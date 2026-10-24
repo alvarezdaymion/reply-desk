@@ -108,13 +108,13 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 
 def iso(t: dt.datetime) -> str:
-    """UTC, second precision: these strings sort in time order."""
-    return t.astimezone(dt.UTC).isoformat(timespec="seconds")
+    """UTC with fixed microsecond precision, so strings sort in time order."""
+    return t.astimezone(dt.UTC).isoformat(timespec="microseconds")
 
 
 def zulu(t: dt.datetime) -> str:
     """UTC with a Z, the form the Instantly API uses."""
-    return t.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return iso(t).replace("+00:00", "Z")
 
 
 def body_hash(body: str) -> str:
@@ -204,13 +204,16 @@ class Store:
     def add_reply(self, r: dict[str, Any]) -> int | None:
         """Store an inbound reply once. None if this provider message is already stored."""
         now = self.now()
+        received = dt.datetime.fromisoformat(r["received_at"].replace("Z", "+00:00"))
+        if received.tzinfo is None:
+            received = received.replace(tzinfo=dt.UTC)
         with self.tx() as c:
             cur = c.execute(
                 "INSERT OR IGNORE INTO replies (provider_id, thread_id, lead_email, inbox, subject, body, received_at,"
                 " body_complete, auto_reply, first_name, company, created_at, updated_at)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (r["provider_id"], r.get("thread_id", ""), r["lead_email"].lower(), r["inbox"], r.get("subject", ""),
-                 r.get("body", ""), r["received_at"], int(not r.get("truncated")),
+                 r.get("body", ""), iso(received), int(not r.get("truncated")),
                  int(bool(r.get("auto_reply"))), r.get("first_name", ""),
                  r.get("company", ""), now, now))
             if cur.rowcount != 1:

@@ -170,3 +170,48 @@ def test_check_page_stops_after_a_rate_limit(tmp_path, capsys):
     assert cli.check_page(make_cfg(tmp_path), fetch=limited, sleep=sleeps.append) is False
     assert len(calls) == 1 and not sleeps
     assert "429" in capsys.readouterr().out
+
+
+def test_loop_resumes_polling_after_cooldown_before_a_queued_send(tmp_path, monkeypatch):
+    from reply_desk.http import HttpError
+
+    rig = Rig(tmp_path, pages={"enabled": False})
+    rig.inbox.add_inbound("lead@example.com", "Tell me more")
+    rig.desk.tick()
+    card = rig.card("lead@example.com")
+    snapshot = rig.inbox.thread("", "lead@example.com")
+    unsubscribe = rig.inbox.add_inbound("lead@example.com", "Please unsubscribe", thread="th-new", minutes_ago=1)
+    listing = rig.inbox.list_replies
+    polls = []
+
+    def replies(since):
+        polls.append(since)
+        return listing(since)
+
+    def limited(email):
+        raise HttpError("lead lookup returned HTTP 429", 429, 2)
+
+    updates = rig.tg.updates
+    handled = []
+
+    def queued(offset, timeout):
+        if handled:
+            raise KeyboardInterrupt()
+        assert rig.store.has_reply(unsubscribe["id"])
+        assert rig.store.is_suppressed("lead@example.com")
+        handled.append(True)
+        return updates(offset, timeout)
+
+    monkeypatch.setattr(rig.inbox, "list_replies", replies)
+    monkeypatch.setattr(rig.inbox, "lead", limited)
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: snapshot)
+    monkeypatch.setattr(rig.tg, "updates", queued)
+    monkeypatch.setattr(cli, "build_desk", lambda cfg, say=print: rig.desk)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: rig.clock.now().timestamp())
+    monkeypatch.setattr(cli.time, "sleep", rig.clock.sleep)
+    path = tmp_path / "reply-desk.toml"
+    path.write_text("")
+    rig.tg.tap(card["id"])
+    assert cli.main(["run", "--loop", "--quiet", "--config", str(path)]) == 0
+    assert len(polls) == 2 and polls[0] == polls[1]
+    assert handled and not rig.inbox.sent and rig.store.card(card["id"])["state"] == "closed"

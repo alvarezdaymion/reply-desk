@@ -1,10 +1,11 @@
-"""Unsupported state schemas are rejected without changing saved data."""
+"""State schema compatibility and timestamp ordering."""
 
+import datetime as dt
 import sqlite3
 
 import pytest
 
-from reply_desk.store import Store
+from reply_desk.store import Store, iso, zulu
 
 
 @pytest.mark.parametrize("version", [0, 1, 2, 4])
@@ -52,4 +53,34 @@ def test_fresh_state_uses_the_verified_schema_and_reopens(tmp_path):
     store.close()
     store = Store(path)
     assert store.counts()["sends"] == {}
+    store.close()
+
+
+def test_timestamp_formats_keep_fractional_precision_in_utc():
+    moment = dt.datetime.fromisoformat("2026-10-21T15:00:00.125001+02:00")
+    assert iso(moment) == "2026-10-21T13:00:00.125001+00:00"
+    assert zulu(moment) == "2026-10-21T13:00:00.125001Z"
+    assert iso(moment.replace(microsecond=0)) == "2026-10-21T13:00:00.000000+00:00"
+
+
+def test_reply_freshness_and_cancellation_use_normalized_fractional_times(tmp_path):
+    store = Store(tmp_path / "desk.db")
+    ids = [store.add_reply({"provider_id": mid, "lead_email": "lead@example.com", "inbox": "sender@example.org",
+                            "received_at": at}) for mid, at in [
+                                ("in-late", "2026-10-21T08:00:00.9-05:00"),
+                                ("in-early", "2026-10-21T15:00:00.100001+02:00"),
+                                ("in-middle", "2026-10-21T13:00:00.500Z")]]
+    late, early, middle = ids
+    assert store.reply(early)["received_at"] == "2026-10-21T13:00:00.100001+00:00"
+    assert not store.has_newer_reply(late)
+    assert store.has_newer_reply(early) and store.has_newer_reply(middle)
+    assert [r["id"] for r in store.replies("new")] == [early, middle, late]
+    due = dt.datetime.fromisoformat("2026-10-23T09:00:00.75+00:00")
+    later_followup = store.schedule_followup(late, 1, due, "due")
+    earlier_followup = store.schedule_followup(early, 1, due, "due")
+    assert store.cancel_followups("lead@example.com", "new reply", before_reply_id=middle) == 1
+    assert store.followup(earlier_followup)["state"] == "cancelled"
+    assert store.followup(later_followup)["state"] == "scheduled"
+    assert not store.due_followups(due - dt.timedelta(microseconds=1))
+    assert [f["id"] for f in store.due_followups(due)] == [later_followup]
     store.close()

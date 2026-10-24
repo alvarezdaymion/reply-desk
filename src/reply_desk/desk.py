@@ -1,6 +1,6 @@
 """One tick of the reply desk, and the handlers for the buttons on a card.
 
-tick() runs five steps. A step that fails is reported and the others still run.
+tick() runs five steps. A failed or unfinished poll holds later steps; rate limits stop all work.
 
 1. recover     settle sends and cards that a stopped process left in flight (reads only)
 2. poll        store new replies from the inbox, once each (keyed by the provider's message ID)
@@ -119,18 +119,21 @@ class Desk:
         steps: list[tuple[str, Callable[[], None]]] = [("recover", self.recover), ("triage", self.triage),
                                                        ("taps", lambda: self.taps(updates_timeout)),
                                                        ("follow-ups", self.followups)]
-        if poll:
+        if poll or self.store.get("inbox.pagination") not in (None, "null"):
             steps.insert(1, ("poll", self.poll))
         for name, step in steps:
             try:
                 step()
+                if name == "poll" and self.store.get("inbox.pagination") not in (None, "null"):
+                    break
             except Exception as e:
                 errors.append("%s: %s" % (name, short(e)))
                 self.store.log("tick.error", name, short(e))
                 retry_after = retry_delay(e)
                 if retry_after:
                     until = self.clock() + dt.timedelta(seconds=retry_after)
-                    self.store.put("api.retry_until", until.isoformat())
+                    self.store.put("api.retry_until", iso(until))
+                if retry_after or name == "poll":
                     break
         return {"stats": dict(self.stats), "errors": errors, "retry_after": retry_after}
 
@@ -189,6 +192,7 @@ class Desk:
 
     def _store_replies(self, items: list[dict[str, Any]], campaigns: set[str],
                        newest: dt.datetime | None) -> dt.datetime | None:
+        saved = []
         for item in items:
             if item.get("ue_type") not in (None, 2):  # only what people sent us
                 continue
@@ -199,13 +203,17 @@ class Desk:
             newest = max(newest or created, created)
             if (campaigns and r["campaign_id"] not in campaigns) or self.store.has_reply(r["provider_id"]):
                 continue
+            reply_id = self.store.add_reply({**r, "received_at": iso(created)})
+            if reply_id:
+                saved.append((reply_id, r["lead_email"]))
+                self.stats["replies"] += 1
+        for reply_id, email in saved:
             try:
-                r.update(self.inbox.lead(r["lead_email"]))
+                lead = self.inbox.lead(email)
+                self.store.update_reply(reply_id, **{k: lead[k] for k in ("first_name", "company") if k in lead})
             except Exception as e:
                 raise_if_rate_limited(e)
-                self.store.log("lead.lookup_failed", r["lead_email"], short(e))
-            if self.store.add_reply({**r, "received_at": iso(created)}):
-                self.stats["replies"] += 1
+                self.store.log("lead.lookup_failed", email, short(e))
         return newest
 
     # ---- triage --------------------------------------------------------------------------------
@@ -383,7 +391,11 @@ class Desk:
             return self._settle(card, "closed", "this address unsubscribed; nothing was sent")
         if self.store.has_newer_reply(reply["id"]):
             return self._settle(card, "stale", "they wrote again, so this draft is out of date; nothing was sent")
-        for url in drafts.page_links(card["draft"], reply["page_url"] or "", self.cfg["business"]["booking_url"]):
+        try:
+            links = drafts.page_links(card["draft"], reply["page_url"] or "", self.cfg["business"]["booking_url"])
+        except ValueError as e:
+            return self._back_to_pending(card, str(e) + "; nothing was sent")
+        for url in links:
             ok, why = pages.check_live(url, reply["page_marker"], self.fetch)
             if not ok:
                 return self._back_to_pending(card, "the page is not live (%s); nothing was sent" % why)

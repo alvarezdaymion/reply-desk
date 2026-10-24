@@ -60,14 +60,20 @@ def domain_of(email: str) -> str:
 
 
 def page_links(text: str, page_url: str, booking_url: str = "") -> list[str]:
-    """Complete URLs that reference the prepared page or its host, in order of appearance."""
+    """Return the saved page URL, rejecting extensions before any live check."""
     if not page_url:
         return []
     host = urllib.parse.urlsplit(page_url).hostname
-    urls = re.findall(r"https?://[^\s<>\"']+", text, re.I)
-    links = (url for url in urls if url != booking_url
-             and (page_url in url or urllib.parse.urlsplit(url).hostname == host))
-    return list(dict.fromkeys(links))
+    links = []
+    for url in re.findall(r"https?://\S+", text, re.I):
+        if booking_url and url.startswith(booking_url) and re.fullmatch(r"[.,;:!?]*", url[len(booking_url):]):
+            continue
+        if page_url in url or urllib.parse.urlsplit(url).hostname == host:
+            if not url.startswith(page_url) or not re.fullmatch(r"[.,;:!?]*", url[len(page_url):]):
+                raise ValueError("the page link must use the saved URL followed by whitespace or sentence punctuation")
+            if page_url not in links:
+                links.append(page_url)
+    return links
 
 
 def values_for(cfg: Any, reply: dict[str, Any]) -> dict[str, str]:

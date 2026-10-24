@@ -192,14 +192,14 @@ def test_follow_ups_are_timed_to_what_they_wrote_and_stop_when_they_reply(rig):
     card = interested(rig, "Sounds interesting. I'll look it over this weekend.")
     tap(rig, card)
     [f] = rig.store.followups("scheduled")
-    assert f["due_at"] == "2026-10-26T09:00:00+00:00" and '"this weekend"' in f["why"]  # the Monday after
+    assert f["due_at"] == "2026-10-26T09:00:00.000000+00:00" and '"this weekend"' in f["why"]  # the Monday after
     rig.clock.t = dt.datetime(2026, 10, 26, 9, 0, tzinfo=dt.UTC)
     rig.desk.tick(poll=False)
     follow = rig.card(PAT)
     assert follow["kind"] == "followup" and "Hope the weekend went well" in follow["draft"]
     assert tap(rig, follow)["state"] == "sent"
     [nxt] = rig.store.followups("scheduled")
-    assert nxt["step"] == 2 and nxt["due_at"] == "2026-10-30T09:00:00+00:00"
+    assert nxt["step"] == 2 and nxt["due_at"] == "2026-10-30T09:00:00.000000+00:00"
     rig.inbox.add_inbound(PAT, "Thanks, let's talk next month.", minutes_ago=-60 * 24 * 5)
     rig.desk.tick()
     assert rig.store.followups("scheduled") == [] and len(rig.inbox.sent) == 2
@@ -399,7 +399,7 @@ def test_recovery_schedules_followup_from_the_original_settlement_time(rig, monk
     rig.restart().recover()
     rig.desk.recover()
     [followup] = rig.store.followups("scheduled")
-    assert followup["due_at"] == "2026-10-23T09:00:00+00:00"
+    assert followup["due_at"] == "2026-10-23T09:00:00.000000+00:00"
     assert len(rig.inbox.sent) == 1
 
 
@@ -666,7 +666,7 @@ def test_recovery_uses_ledger_settlement_time_before_moving_the_card(rig, monkey
     rig.restart().recover()
     rig.desk.recover()
     assert rig.store.card(card["id"])["updated_at"] == settled_at
-    assert rig.store.followups("scheduled")[0]["due_at"] == "2026-10-23T09:00:00+00:00"
+    assert rig.store.followups("scheduled")[0]["due_at"] == "2026-10-23T09:00:00.000000+00:00"
     assert len(rig.inbox.sent) == 1
 
 
@@ -770,7 +770,7 @@ def test_the_first_poll_window_is_saved_before_processing_replies(rig, monkeypat
     monkeypatch.setattr(rig.inbox, "lead", interrupted)
     with pytest.raises(Crash):
         rig.desk.poll()
-    assert rig.store.has_reply(first["id"]) and not rig.store.has_reply(second["id"])
+    assert rig.store.has_reply(first["id"]) and rig.store.has_reply(second["id"])
     monkeypatch.setattr(rig.inbox, "lead", original)
     rig.store.close()
     rig.clock.t += dt.timedelta(hours=2)
@@ -810,3 +810,131 @@ def test_a_booking_link_on_the_page_host_does_not_need_the_page_marker(make_rig)
     card = interested(rig)
     assert rig.cfg["business"]["booking_url"] in card["draft"]
     assert tap(rig, card)["state"] == "sent"
+
+
+@pytest.mark.parametrize("suffix", ["'details", '"details', "<details>", "/details", "?view=1", "#details",
+                                    ".details", ";details", "%27details", ".'details"])
+def test_page_url_extensions_are_refused_before_any_live_check(rig, monkeypatch, suffix):
+    card = interested(rig)
+    reply = rig.store.reply(card["reply_id"])
+    checks = []
+
+    def live(url):
+        checks.append(url)
+        return 200, reply["page_marker"]
+
+    monkeypatch.setattr(rig.desk, "fetch", live)
+    rig.store.edit_draft(card["id"], "Overview: " + reply["page_url"] + suffix)
+    rig.desk._refresh(card["id"], "Edited")
+    assert tap(rig, card)["state"] == "pending"
+    assert not checks and not rig.inbox.sent and rig.store.send_by_key(rig.desk.key(card)) is None
+
+
+@pytest.mark.parametrize("suffix", ["", "\nThanks.", ".", ", thanks.", "!", "?", "; next steps.", ":\nDetails."])
+def test_page_urls_allow_only_whitespace_or_sentence_punctuation_after_them(rig, monkeypatch, suffix):
+    card = interested(rig)
+    reply = rig.store.reply(card["reply_id"])
+    checks = []
+
+    def live(url):
+        checks.append(url)
+        return 200, reply["page_marker"]
+
+    monkeypatch.setattr(rig.desk, "fetch", live)
+    rig.store.edit_draft(card["id"], "Overview: " + reply["page_url"] + suffix)
+    rig.desk._refresh(card["id"], "Edited")
+    assert tap(rig, card)["state"] == "sent"
+    assert [url.split("?rd-check=", 1)[0] for url in checks] == [reply["page_url"]]
+
+
+def test_fractional_reply_order_survives_polling_and_restart(make_rig, monkeypatch):
+    rig = make_rig(pages={"enabled": False})
+    older = rig.inbox.add_inbound(PAT, "What does it cost?", thread="th-old")
+    latest = rig.inbox.add_inbound(PAT, "Tell me more", thread="th-new")
+    older["timestamp_created"] = "2026-10-21T13:00:00.125Z"
+    latest["timestamp_created"] = "2026-10-21T15:00:00.875+02:00"
+    rig.desk.tick()
+    [first, last] = sorted(rig.store.cards("pending"), key=lambda c: c["reply_id"])
+    assert rig.store.get("inbox.cursor") == "2026-10-21T13:00:00.875000+00:00"
+    rig.store.close()
+    rig.restart()
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: [older, latest])
+    assert tap(rig, last)["state"] == "sent"
+    assert tap(rig, first)["state"] == "stale"
+    assert [email["reply_to_id"] for email in rig.inbox.sent] == [latest["id"]]
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_a_fetched_batch_is_saved_before_any_lead_lookup(rig, monkeypatch, paged):
+    from reply_desk.http import HttpError
+
+    card = interested(rig)
+    snapshot = rig.inbox.thread("", PAT)
+    rig.inbox.add_inbound("other@example.org", "What does it cost?", thread="th-other", minutes_ago=2)
+    unsubscribe = rig.inbox.add_inbound(PAT, "Please unsubscribe", thread="th-new", minutes_ago=1)
+    if paged:
+        monkeypatch.setattr(rig.inbox, "list_reply_page", lambda since, after: (rig.inbox.list_replies(since), ""),
+                            raising=False)
+
+    def limited(email):
+        raise HttpError("lead lookup returned HTTP 429", 429, 3)
+
+    monkeypatch.setattr(rig.inbox, "lead", limited)
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: snapshot)
+    rig.tg.tap(card["id"])
+    assert rig.desk.tick()["retry_after"] == 3
+    assert rig.store.has_reply(unsubscribe["id"])
+    assert not rig.inbox.sent
+    rig.store.close()
+    rig.clock.sleep(3)
+    rig.restart().tick(poll=False)
+    assert rig.store.is_suppressed(PAT) and not rig.inbox.sent
+
+
+@pytest.mark.parametrize("rate_limited", [False, True])
+def test_an_interrupted_poll_resumes_before_queued_approvals(rig, monkeypatch, rate_limited):
+    from reply_desk.http import HttpError
+
+    card = interested(rig)
+    snapshot = rig.inbox.thread("", PAT)
+    fresh = rig.inbox.add_inbound(PAT, "Unsubscribe", thread="th-new", minutes_ago=1)
+    reads = []
+
+    def interrupted(since):
+        reads.append(since)
+        if len(reads) == 1:
+            raise HttpError("list replies unavailable", 429 if rate_limited else 503, 3 if rate_limited else None)
+        return [fresh]
+
+    monkeypatch.setattr(rig.inbox, "list_replies", interrupted)
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: snapshot)
+    rig.tg.tap(card["id"])
+    assert rig.desk.tick()["errors"]
+    assert not rig.inbox.sent and rig.store.card(card["id"])["state"] == "pending"
+    rig.clock.sleep(3)
+    rig.store.close()
+    rig.restart().tick(poll=False)
+    assert len(reads) == 2 and reads[0] == reads[1]
+    assert rig.store.is_suppressed(PAT) and not rig.inbox.sent
+
+
+def test_a_poll_backlog_finishes_before_queued_approvals(rig, monkeypatch):
+    card = interested(rig)
+    snapshot = rig.inbox.thread("", PAT)
+    fresh = rig.inbox.add_inbound(PAT, "Unsubscribe", thread="th-new", minutes_ago=1)
+    reads = []
+
+    def page(since, after):
+        reads.append(after)
+        if after == "3":
+            return [fresh], ""
+        return [], str(int(after or "0") + 1)
+
+    monkeypatch.setattr(rig.inbox, "list_reply_page", page, raising=False)
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: snapshot)
+    rig.tg.tap(card["id"])
+    rig.desk.tick()
+    assert reads == ["", "1", "2"] and not rig.inbox.sent
+    rig.desk.tick(poll=False)
+    assert reads == ["", "1", "2", "3"]
+    assert rig.store.is_suppressed(PAT) and not rig.inbox.sent
