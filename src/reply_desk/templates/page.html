@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="reply-desk-page" content="$marker">
+<title>$title</title>
+<style>
+  :root { --ink: #1d2433; --muted: #5b6475; --line: #e3e6ec; --accent: #2f5bd3; --bg: #f7f8fa; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 56px 20px 72px; }
+  .from { color: var(--muted); font-size: 14px; letter-spacing: .04em; text-transform: uppercase; }
+  h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.15; margin: 12px 0 24px; }
+  ul { padding-left: 20px; }
+  li { margin: 6px 0; }
+  .cta { display: inline-block; margin-top: 16px; padding: 12px 20px; border-radius: 8px;
+         background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="from">$business</div>
+  <h1>$headline</h1>
+  $paragraphs
+  $points
+  $cta
+  <footer>Prepared individually by $business. This page is not listed anywhere.</footer>
+</main>
+</body>
+</html>
