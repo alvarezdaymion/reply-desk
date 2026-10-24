@@ -131,7 +131,7 @@ def test_telegram_errors_never_contain_the_token():
     client, _ = telegram((400, {"ok": False, "description": "Bad Request: chat not found"}))
     with pytest.raises(HttpError) as e:
         client.send_text("hi")
-    assert "Telegram sendMessage returned HTTP 400: Bad Request: chat not found" == str(e.value)
+    assert "Telegram sendMessage returned HTTP 400" == str(e.value)
     assert TOKEN not in str(e.value)
 
 
@@ -147,3 +147,71 @@ def test_recent_chats_lists_who_messaged_the_bot():
         {"update_id": 2, "callback_query": {"message": {"chat": {"id": 42, "first_name": "Sam"}}}}]}))
     assert recent_chats(TOKEN, transport=t) == [("42", "Sam")]
     assert t.calls[0]["url"].endswith("/getUpdates") and t.calls[0]["json"] == {"timeout": 0}
+
+
+def test_thread_follows_even_a_short_page_continuation():
+    client, t = instantly((200, {"items": [{"id": "e1"}], "next_starting_after": "c1"}),
+                          (200, {"items": [{"id": "e2"}]}))
+    assert [m["id"] for m in client.thread("t1", "lead@example.com")] == ["e1", "e2"]
+    assert t.query(1)["starting_after"] == "c1"
+
+
+@pytest.mark.parametrize("page", [
+    {"items": [None]}, {"items": [], "next_starting_after": {"bad": "cursor"}},
+])
+def test_thread_rejects_incomplete_page_shapes(page):
+    client, _ = instantly((200, page))
+    with pytest.raises(HttpError):
+        client.thread("t1", "lead@example.com")
+
+
+def test_thread_rejects_a_repeated_cursor():
+    page = {"items": [{"id": "e1"}], "next_starting_after": "c1"}
+    client, _ = instantly((200, page), (200, page))
+    with pytest.raises(HttpError, match="cursor"):
+        client.thread("t1", "lead@example.com")
+
+
+def test_error_bodies_cannot_echo_credentials_or_urls():
+    secret = "synthetic-credential"
+    client, _ = instantly((401, {"message": "Bearer " + secret + " https://example.com/" + secret}))
+    with pytest.raises(HttpError) as error:
+        client.thread("t1", "lead@example.com")
+    assert str(error.value) == "Instantly read thread returned HTTP 401"
+
+
+def test_telegram_refuses_to_silently_truncate_a_card():
+    client, transport = telegram()
+    with pytest.raises(ValueError, match="long"):
+        client.send_card("x" * 4097, [("Send", "rd:send:c1")])
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("delay,expected", [(9, 9), (-1, None), ("bad", None)])
+def test_rate_limit_retains_only_a_valid_numeric_retry_delay(delay, expected):
+    client, _ = telegram((429, {"description": "private text", "parameters": {"retry_after": delay}}))
+    with pytest.raises(HttpError) as error:
+        client.updates(0, 25)
+    assert error.value.retry_after == expected
+    assert "private text" not in str(error.value)
+
+
+def test_list_replies_never_silently_returns_a_capped_result():
+    pages = [(200, {"items": [{"id": "e%d" % i}], "next_starting_after": "c%d" % i}) for i in range(4)]
+    client, _ = instantly(*pages, (200, {"items": [{"id": "last"}]}))
+    assert client.list_replies("2026-10-21T00:00:00Z")[-1]["id"] == "last"
+
+
+def test_telegram_preserves_entities_within_the_visible_text_limit():
+    client, transport = telegram((200, {"ok": True, "result": {"message_id": 7}}))
+    text = "<b>Draft</b>\n" + "&amp;" * 1000
+    client.send_card(text, [("Send", "rd:send:c1")])
+    assert transport.calls[0]["json"]["text"] == text
+
+
+@pytest.mark.parametrize("result", [{}, {"message_id": None}, {"message_id": "invalid"}, {"message_id": False}])
+def test_telegram_does_not_invent_a_message_id(result):
+    client, transport = telegram((200, {"ok": True, "result": result}))
+    with pytest.raises(HttpError, match="message ID"):
+        client.send_card("Draft", [("Send", "rd:send:c1")])
+    assert len(transport.calls) == 1

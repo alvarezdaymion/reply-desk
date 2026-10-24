@@ -10,7 +10,7 @@ If you were asked to set Reply Desk up for someone, follow [SETUP.md](SETUP.md).
 - `src/reply_desk/store.py`: SQLite schema and state changes. Every card, send and follow-up state change is a conditional UPDATE.
 - `src/reply_desk/desk.py`: one tick (recover, poll, triage, taps, follow-ups) and the Send, Edit and Skip handlers.
 - `src/reply_desk/classify.py`, `drafts.py`, `timing.py`: rules, templates and follow-up dates. Pure functions.
-- `src/reply_desk/pages.py`: page render, publishers and the live check.
+- `src/reply_desk/pages.py`: local page preparation, publishers and the live check.
 - `src/reply_desk/llm.py`: optional model labels and drafts, checked before use.
 - `src/reply_desk/connectors/`: Instantly and Telegram clients over `http.py`.
 - `src/reply_desk/demo.py`: fakes for the demo. `cli.py`: commands. `config.py`: schema and defaults, mirrored by `templates/reply-desk.example.toml`.
@@ -24,6 +24,11 @@ If you were asked to set Reply Desk up for someone, follow [SETUP.md](SETUP.md).
 - **State changes are conditional.** Change rows only through the `Store` methods, which update `... WHERE state IN (expected)`, so double taps, restarts and second processes can't move a row twice. Keep the UNIQUE constraints on `sends.intent_key` and `(recipient, body_hash)`.
 - **Dry-run stays the default**, and in dry-run the provider is wrapped in `NoSend`.
 - **Checks before every send:** nothing left to fill in, not suppressed, linked page live (200 and its marker), no newer message from the person. Do not skip one to get a send through.
+- **Complete reads before approval.** Persist poll pagination, exhaust thread pagination, and hold incomplete reply bodies for retrieval before drafting. Missing or malformed thread metadata blocks sending.
+- **Approve the displayed revision.** Send buttons identify the exact draft shown. An edit is sendable only after Telegram confirms its display. Drafts over 2,500 characters are refused.
+- **External work is claimed first.** Save card-post intent and page markers before calling Telegram or the publisher, and claim Edit callbacks before posting prompts. Uncertain card posts stay locked for a person; page recovery only checks the saved URL. Save rule decisions or drafts before optional model calls and disable SDK retries so a restart never repeats an uncertain paid call.
+- **Follow-up recovery is idempotent.** Reconcile terminal sends, cards and follow-ups on restart using the original settlement time. Empty `gaps_days` cancels scheduled follow-ups and closes pending follow-up cards before taps.
+- **Use an explicit time zone.** Follow-ups default to UTC; other zones use IANA names. Empty time zones are rejected. Stop the service before `resolve`, then restart it.
 - **Unsubscribes are final.** Rules decide them before the model is asked; suppressed addresses are never sent to.
 - **The model drafts, never sends.** Every model answer goes through `llm.draft_problem` and falls back to the rules.
 - **Secrets** come from environment variables. Errors name the call, never the URL or headers (`http.py`). Never commit `.env`, `reply-desk.toml`, `state/` or `site/`.

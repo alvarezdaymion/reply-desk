@@ -42,7 +42,7 @@ cta_label = "Pick a time to talk"   # the button links to business.booking_url
 [followups]
 gaps_days = [2, 4, 7]       # days before follow-up 1, 2 and 3 when the person named no time; [] turns them off
 send_hour = 9               # local hour a follow-up becomes due
-timezone = ""               # an IANA name such as "America/New_York"; empty uses this machine's time zone
+timezone = "UTC"            # UTC or an IANA name such as "America/New_York"; empty is rejected
 max_days_out = 90           # a time they named further out than this is ignored as a misread
 
 # Canned answers for questions, used by the rules (no model). The first entry with a matching

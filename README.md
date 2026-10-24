@@ -35,14 +35,20 @@ The demo runs the real desk, ledger, classifier and page builder against a fake 
 `reply-desk run` is one tick. `reply-desk run --loop` keeps ticking and picks up taps within seconds. Each tick:
 
 1. **Recover.** Anything a stopped process left in flight is settled first, without sending (see below).
-2. **Poll.** New replies are read from Instantly and stored once each, keyed by Instantly's message ID. Auto-replies are recorded and get no card.
+2. **Poll.** New replies are read from Instantly and stored once each, keyed by Instantly's message ID. Each poll reads up to three pages and saves its continuation and original time window, so a backlog resumes across ticks and restarts. Auto-replies are recorded and get no card. Truncated or missing bodies wait for a complete read before drafting; retrieval is retried on later ticks.
 3. **Sort and draft.** Plain rules label each reply (or the optional model does, and its answer is checked). An interested reply gets its page built and published, and its card waits until the page is live. Unsubscribes are suppressed. Every other reply becomes a card with a draft.
 4. **Taps.** Send, Edit and Skip arrive by long polling, so there is no public webhook to expose. Edit asks you to reply to a message with the new text.
 5. **Follow-ups.** A follow-up that is due becomes a card, unless the person has written since.
 
-A step that fails is reported and the rest of the tick still runs.
+A step that fails is reported and the rest of the tick still runs. In loop mode, errors trigger exponential backoff from one to 60 seconds; a longer provider retry delay is honored.
 
 When you tap Send, the desk checks that the draft has nothing left to fill in, that the address hasn't unsubscribed, that a linked page still answers 200 with its marker, and that the person hasn't written again since the card was made (if they have, the card is closed as stale). In dry-run mode, the default, the checks run and nothing is sent.
+
+Thread checks read every page and block sending if any page or required message metadata cannot be read. Drafts are limited to 2,500 characters, the size shown on a card. Each Send button identifies that draft; edits require a successful card update and a new tap on the updated button. Telegram messages are checked for length after decoding their markup and are never sliced.
+
+Card posts are claimed before contacting Telegram. If the post fails, returns no message ID or is interrupted, its outcome is locked and it is never posted again automatically. `reply-desk status` lists these cards; check Telegram and answer the lead by hand. Unposted cards whose delivery was never attempted can be posted during recovery. Before a deploy command, the page URL and marker are saved; recovery checks that URL without repeating the command. If the page never appears, check the deployment and answer by hand.
+
+Edit prompts are claimed by callback ID before posting, so a redelivered tap cannot repeat an uncertain prompt. If no prompt arrives, tap Edit again to request a new one. Optional model calls have SDK retries disabled; saved rule decisions and drafts provide the fallback after an interruption.
 
 ## Never the same email twice
 
@@ -63,7 +69,7 @@ Email APIs sometimes accept a send and then fail to confirm it: the request time
 
 No state leads back to a send. After a restart, an `accepted` send is read back by its ID. An `intent` with no ID means the process stopped during the send call: the desk looks for the exact message in the thread on the same 3, 10, 20 second schedule, confirms it if it is there and locks it if it is not. Taps are claimed with a conditional update, so a double tap, or a tap Telegram delivers again after a restart, finds the card already handled.
 
-To settle a locked send, check the sent folder in Instantly and run `reply-desk resolve <id> --sent` or `--not-sent`, or `reply-desk resolve --recheck` to read every locked send back once more. None of these sends anything; if the email did not go out and still needs an answer, reply by hand.
+To settle a locked send, stop the running service (or pause its scheduler) to release the state-directory lock. Check the sent folder in Instantly and run `reply-desk resolve <id> --sent` or `--not-sent`, or `reply-desk resolve --recheck` to read every locked send back once more, then restart the service. None of these commands sends anything; if the email did not go out and still needs an answer, reply by hand. Recovery reconciles a settled ledger row with its card and restores any missing follow-up using the card's original settlement time.
 
 `tests/test_sender.py` covers a send accepted but not yet visible, confirmed on the second readback, never confirmed, a timeout on the send call, a restart mid-send with and without the message in the thread, a restart after acceptance and the same-text refusal. `tests/test_desk.py` covers double taps, a tap redelivered after a restart and a crash mid-send, end to end.
 
@@ -82,7 +88,7 @@ After a confirmed send, the next follow-up is planned from the person's own word
 | "after the holidays", "in the new year" | the first business day after 1 January |
 | "in two weeks", "in 10 days", "in a couple of months" | that day (a weekend moves to Monday) |
 
-When several phrases match, the latest wins. A date more than 90 days out is ignored as a misread. With no phrase, follow-ups use `gaps_days` (2, 4 and 7 days by default). A plain "no thanks" gets a polite close and no follow-ups. Each follow-up is a card like any other and is dropped if the person writes first. The parser is `src/reply_desk/timing.py`, tested against a fixed clock in `tests/test_timing.py`.
+When several phrases match, the latest wins. A date more than 90 days out is ignored as a misread. With no phrase, follow-ups use `gaps_days` (2, 4 and 7 days by default). Setting `gaps_days = []` also cancels existing scheduled follow-ups and closes their pending cards before taps are processed. A plain "no thanks" gets a polite close and no follow-ups. Each follow-up is a card like any other and is dropped if the person writes first. The time zone defaults to UTC; set an IANA name to preserve the chosen local hour across daylight-saving changes. Empty time zones are rejected. The parser is `src/reply_desk/timing.py`, tested against a fixed clock in `tests/test_timing.py`.
 
 ## Connectors
 
@@ -116,7 +122,7 @@ Everything lives in `reply-desk.toml` (start from `uv run reply-desk init`; defa
 - `[telegram]`: who may tap the buttons.
 - `[pages]`: base URL, publisher, and the page's headline, paragraphs and bullet points.
 - `[followups]`: default gaps, send hour, time zone, how far out a named date may be.
-- `[[answers]]`: canned answers for common questions, matched by keyword.
+- `[[answers]]`: plain-text canned answers for common questions, matched by keyword; placeholders are rejected.
 - `[drafts]`: every draft template. A line whose placeholder is empty is left out.
 
 Credentials come from environment variables or a `.env` file next to the config (see `.env.example`), never from this file.

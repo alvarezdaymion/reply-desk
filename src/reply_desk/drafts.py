@@ -13,11 +13,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .config import PLACEHOLDERS, template_fields
+from .config import template_fields
 from .timing import Hint, human_day
 
 ANSWER_MARKER = "[[ write your answer here ]]"
-MAX_CHARS = 5000
+MAX_CHARS = 2500
 
 OPENERS = {
     "weekend": "Hope the weekend went well. Did you get a chance to look at this?",
@@ -27,7 +27,7 @@ OPENERS = {
 }
 
 _MARKER = re.compile(r"\[\[.*?\]\]", re.S)
-_UNFILLED = re.compile(r"\{(%s)\}" % "|".join(sorted(PLACEHOLDERS)))
+_UNFILLED = re.compile(r"\{[A-Za-z_]\w*(?:[^{}]*)\}")
 
 
 def fill(template: str, values: dict[str, Any]) -> str:

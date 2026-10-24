@@ -51,7 +51,7 @@ def reply_from_item(item: dict[str, Any]) -> dict[str, Any]:
         "received_at": str(item.get("timestamp_created") or ""),
         "auto_reply": item.get("is_auto_reply") in (1, True, "1", "true"),
         "campaign_id": str(item.get("campaign_id") or ""),
-        "truncated": bool(item.get("body_fallback_reason")),
+        "truncated": bool(item.get("body_fallback_reason")) or not bool(body.get("text") or body.get("html")),
     }
 
 
@@ -67,26 +67,48 @@ class InstantlyClient:
         data = self.http.request("GET", self.base + "/emails", label=label, params=params)
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):
             raise HttpError("%s returned an unexpected shape" % label)
-        return [i for i in data["items"] if isinstance(i, dict)], str(data.get("next_starting_after") or "")
+        cursor = data.get("next_starting_after")
+        if any(not isinstance(i, dict) for i in data["items"]) or (cursor is not None and not isinstance(cursor, str)):
+            raise HttpError("%s returned an unexpected shape" % label)
+        return data["items"], cursor or ""
 
-    def list_replies(self, since: str, max_pages: int = 3) -> list[dict[str, Any]]:
-        """Received emails created at or after `since` (ISO 8601), oldest first."""
+    def list_reply_page(self, since: str, starting_after: str = "") -> tuple[list[dict[str, Any]], str]:
         params: dict[str, Any] = {"email_type": "received", "sort_order": "asc", "limit": PAGE,
                                   "min_timestamp_created": since, "preview_only": "false"}
+        if starting_after:
+            params["starting_after"] = starting_after
+        return self._items(params, "Instantly list replies")
+
+    def list_replies(self, since: str) -> list[dict[str, Any]]:
+        """Received emails created at or after `since` (ISO 8601), oldest first."""
+        cursor = ""
+        seen: set[str] = set()
         items: list[dict[str, Any]] = []
-        for _ in range(max_pages):
-            page, nxt = self._items(params, "Instantly list replies")
+        while True:
+            page, nxt = self.list_reply_page(since, cursor)
             items.extend(page)
-            if not nxt or len(page) < PAGE:
-                break
-            params = {**params, "starting_after": nxt}
-        return items
+            if not nxt:
+                return items
+            if nxt in seen:
+                raise HttpError("Instantly list replies returned a repeated cursor")
+            seen.add(nxt)
+            cursor = nxt
 
     def thread(self, thread_id: str, lead_email: str) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"lead": lead_email, "sort_order": "asc", "limit": PAGE, "preview_only": "false"}
         if thread_id:
             params["search"] = "thread:" + thread_id
-        return self._items(params, "Instantly read thread")[0]
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        while True:
+            page, cursor = self._items(params, "Instantly read thread")
+            items.extend(page)
+            if not cursor:
+                return items
+            if cursor in seen:
+                raise HttpError("Instantly read thread returned a repeated cursor")
+            seen.add(cursor)
+            params["starting_after"] = cursor
 
     def get_email(self, email_id: str) -> dict[str, Any]:
         data = self.http.request("GET", self.base + "/emails/" + urllib.parse.quote(email_id, safe=""),

@@ -177,6 +177,7 @@ def test_edit_then_send_uses_the_new_text(rig):
     tap(rig, card, "edit")
     prompt = rig.store.card(card["id"])["edit_prompt_id"]
     rig.tg.reply_to(prompt, "Hi Alex,\n\nYes, anywhere.\n\nSam")
+    rig.desk.tick(poll=False)
     assert tap(rig, card)["state"] == "sent"
     assert rig.inbox.sent[0]["body"] == "Hi Alex,\n\nYes, anywhere.\n\nSam"
 
@@ -246,3 +247,344 @@ def test_auto_replies_get_no_card_and_each_reply_is_stored_once(rig):
     rig.desk.tick()
     assert rig.card("ooo@example.com") is None
     assert rig.store.counts()["replies"] == {"ignored": 1}
+
+
+def test_truncated_reply_is_retried_without_drafting_until_complete(rig, monkeypatch):
+    from reply_desk.http import HttpError
+
+    full = rig.inbox.add_inbound(PAT, "Sounds interesting. Please remove me from your list.")
+    excerpt = {**full, "body": {"text": "Sounds interesting."}, "body_fallback_reason": "too_large"}
+    monkeypatch.setattr(rig.inbox, "list_replies", lambda since: [excerpt])
+    original = rig.inbox.get_email
+
+    def unavailable(mid):
+        raise HttpError("read failed")
+
+    monkeypatch.setattr(rig.inbox, "get_email", unavailable)
+    for _ in range(4):
+        rig.desk.tick()
+    assert rig.card(PAT) is None
+    [waiting] = rig.store.replies("new")
+    assert not waiting["body_complete"]
+    monkeypatch.setattr(rig.inbox, "get_email", original)
+    rig.store.close()
+    rig.restart().tick(poll=False)
+    assert rig.store.is_suppressed(PAT) and rig.inbox.sent == []
+
+
+@pytest.mark.parametrize("response", [{}, {"id": "wrong", "body": {"text": "Yes"}},
+                                      {"id": "in-1", "content_preview": "Yes"},
+                                      {"id": "in-1", "body": {"text": "Yes"}, "body_fallback_reason": "large"}])
+def test_incomplete_body_fetch_cannot_release_a_reply(rig, monkeypatch, response):
+    full = rig.inbox.add_inbound(PAT, "Sounds interesting.")
+    monkeypatch.setattr(rig.inbox, "list_replies", lambda since: [{**full, "body_fallback_reason": "large"}])
+    monkeypatch.setattr(rig.inbox, "get_email", lambda mid: response)
+    rig.desk.tick()
+    assert rig.card(PAT) is None and rig.inbox.sent == []
+
+
+def test_later_thread_page_blocks_a_stale_approval(rig, monkeypatch):
+    import json
+
+    from reply_desk.connectors.instantly import InstantlyClient
+
+    card = interested(rig)
+    target = rig.inbox.emails["in-1"]
+    latest = {**target, "id": "in-2", "timestamp_created": "2026-10-21T13:59:00Z",
+              "body": {"text": "Unsubscribe"}}
+    responses = iter([{"items": [target], "next_starting_after": "c1"}, {"items": [latest]}])
+    client = InstantlyClient(api_key="test-key", transport=lambda *args: (200, json.dumps(next(responses)).encode()))
+    monkeypatch.setattr(rig.inbox, "thread", client.thread)
+    assert tap(rig, card)["state"] == "stale"
+    assert rig.inbox.sent == []
+
+
+def test_poll_resumes_a_backlog_across_restart(rig, monkeypatch):
+    import json
+    from urllib.parse import parse_qs, urlsplit
+
+    from reply_desk.connectors.instantly import InstantlyClient
+
+    target = rig.inbox.add_inbound(PAT, "Question?")
+    items = [{**target, "id": "in-%d" % i} for i in range(401)]
+    calls = []
+
+    def transport(method, url, headers, body, timeout):
+        query = parse_qs(urlsplit(url).query)
+        offset = int(query.get("starting_after", ["0"])[0])
+        calls.append((offset, query["min_timestamp_created"][0]))
+        page = {"items": items[offset:offset + 100]}
+        if offset + 100 < len(items):
+            page["next_starting_after"] = str(offset + 100)
+        return 200, json.dumps(page).encode()
+
+    monkeypatch.setattr(rig.desk, "inbox", InstantlyClient(api_key="test-key", transport=transport))
+    rig.desk.poll()
+    assert len(calls) == 3 and not rig.store.has_reply("in-400")
+    rig.store.close()
+    rig.restart()
+    rig.clock.t += dt.timedelta(days=1)
+    monkeypatch.setattr(rig.desk, "inbox", InstantlyClient(api_key="test-key", transport=transport))
+    rig.desk.poll()
+    assert rig.store.has_reply("in-400")
+    assert calls[3][0] == 300 and len({since for _, since in calls}) == 1
+
+
+def test_uncertain_card_post_never_repeats_or_creates_a_second_card(rig, monkeypatch):
+    from reply_desk.http import HttpError
+
+    original = rig.tg.send_card
+    calls = []
+
+    def uncertain(text, buttons):
+        calls.append(True)
+        original(text, buttons)
+        raise HttpError("response lost")
+
+    monkeypatch.setattr(rig.tg, "send_card", uncertain)
+    interested(rig)
+    rig.store.close()
+    rig.restart().tick()
+    rig.desk.tick()
+    [card] = rig.store.cards("pending")
+    assert rig.store.reply(card["reply_id"])["status"] == "carded"
+    assert len(calls) == 1 and card["post_state"] == "locked"
+    assert tap(rig, card)["state"] == "pending" and not rig.inbox.sent
+
+
+def test_restart_after_post_acceptance_never_reposts(rig, monkeypatch):
+    original = rig.tg.send_card
+
+    def crash(text, buttons):
+        original(text, buttons)
+        raise Crash()
+
+    monkeypatch.setattr(rig.tg, "send_card", crash)
+    with pytest.raises(Crash):
+        interested(rig)
+    monkeypatch.setattr(rig.tg, "send_card", original)
+    rig.store.close()
+    rig.restart().tick()
+    assert len(rig.tg.cards) == 1
+    assert rig.card(PAT)["post_state"] == "locked"
+
+
+def test_clipped_draft_cannot_be_sent(make_rig):
+    rig = make_rig(drafts={"interested": "x" * 2501})
+    card = interested(rig)
+    assert tap(rig, card)["state"] == "pending" and not rig.inbox.sent
+    assert "2500" in rig.store.card(card["id"])["note"]
+
+
+def test_unknown_placeholders_in_an_edit_block_sending(rig):
+    card = interested(rig)
+    rig.store.edit_draft(card["id"], "Hello {contact_name}, the amount is {price}.")
+    assert tap(rig, card)["state"] == "pending" and not rig.inbox.sent
+
+
+def test_recovery_schedules_followup_from_the_original_settlement_time(rig, monkeypatch):
+    card = interested(rig)
+
+    def crash(card):
+        raise Crash()
+
+    monkeypatch.setattr(rig.desk, "_arm", crash)
+    with pytest.raises(Crash):
+        tap(rig, card)
+    assert rig.store.card(card["id"])["state"] == "sent"
+    rig.store.close()
+    rig.clock.t += dt.timedelta(days=1)
+    rig.restart().recover()
+    rig.desk.recover()
+    [followup] = rig.store.followups("scheduled")
+    assert followup["due_at"] == "2026-10-23T09:00:00+00:00"
+    assert len(rig.inbox.sent) == 1
+
+
+def test_a_failed_edit_refresh_cannot_approve_the_unseen_text(rig, monkeypatch):
+    from reply_desk.http import HttpError
+
+    card = interested(rig)
+    tap(rig, card, "edit")
+    prompt = rig.store.card(card["id"])["edit_prompt_id"]
+
+    def failed(*args):
+        raise HttpError("update failed")
+
+    monkeypatch.setattr(rig.tg, "update_card", failed)
+    rig.tg.reply_to(prompt, "This replacement must be displayed before approval.")
+    rig.desk.tick(poll=False)
+    assert tap(rig, card)["state"] == "pending" and not rig.inbox.sent
+
+
+def test_an_old_button_cannot_approve_a_successfully_displayed_edit(rig):
+    card = interested(rig)
+    rig.tg.tap(card["id"])
+    old_tap = rig.tg.queue.pop()["callback_query"]
+    tap(rig, card, "edit")
+    prompt = rig.store.card(card["id"])["edit_prompt_id"]
+    rig.tg.reply_to(prompt, "New terms for approval.")
+    rig.desk.tick(poll=False)
+    rig.desk.on_tap(old_tap)
+    assert rig.inbox.sent == []
+    assert tap(rig, card)["state"] == "sent"
+
+
+@pytest.mark.parametrize("already_carded", [False, True])
+def test_disabling_followups_cancels_existing_work_and_blocks_old_buttons(rig, already_carded):
+    tap(rig, interested(rig))
+    rig.clock.t += dt.timedelta(days=7)
+    if already_carded:
+        rig.desk.followups()
+        old = rig.card(PAT)
+        rig.tg.tap(old["id"])
+    rig.cfg.data["followups"]["gaps_days"] = []
+    rig.store.close()
+    rig.restart().tick(poll=False)
+    assert not rig.store.followups("scheduled", "carded")
+    assert not rig.store.cards("pending") and len(rig.inbox.sent) == 1
+
+
+@pytest.mark.parametrize("sent", [True, False])
+def test_recovery_reconciles_a_resolution_committed_before_card_settlement(rig, monkeypatch, sent):
+    card = interested(rig)
+    rig.inbox.script = ["never"]
+    tap(rig, card)
+    [send] = rig.store.sends("locked")
+
+    def crash(send_id):
+        raise Crash()
+
+    monkeypatch.setattr(rig.desk, "settle_send", crash)
+    with pytest.raises(Crash):
+        rig.desk.resolve(send["id"], sent=sent)
+    rig.store.close()
+    rig.restart().recover()
+    assert rig.store.card(card["id"])["state"] == ("sent" if sent else "closed")
+    assert len(rig.inbox.sent) == 1
+
+
+@pytest.mark.parametrize("thread", [[], [{"id": "in-2", "ue_type": 2}], [{"id": "in-2"}]])
+def test_an_uncertain_thread_blocks_approval(rig, monkeypatch, thread):
+    card = interested(rig)
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: thread)
+    assert tap(rig, card)["state"] == "pending"
+    assert rig.inbox.sent == []
+
+
+def test_restart_does_not_repeat_an_uncertain_page_publish(rig):
+    calls = []
+
+    class Publisher:
+        def publish(self, site_dir, slug):
+            calls.append(slug)
+            raise Crash()
+
+    publisher = Publisher()
+    rig.desk.publisher = publisher
+    with pytest.raises(Crash):
+        interested(rig)
+    rig.store.close()
+    rig.restart()
+    rig.desk.publisher = publisher
+    rig.desk.tick(poll=False)
+    assert len(calls) == 1 and rig.card(PAT)
+
+
+def test_restart_uses_rules_after_an_uncertain_model_call(rig):
+    calls = []
+
+    class Drafter:
+        def classify(self, reply, verdict):
+            calls.append(True)
+            raise Crash()
+
+    drafter = Drafter()
+    rig.desk.drafter = drafter
+    with pytest.raises(Crash):
+        interested(rig)
+    rig.store.close()
+    rig.restart()
+    rig.desk.drafter = drafter
+    rig.desk.tick(poll=False)
+    assert len(calls) == 1 and rig.card(PAT)
+
+
+def test_restart_uses_the_saved_rule_followup_after_an_uncertain_model_call(rig):
+    tap(rig, interested(rig))
+    rig.clock.t += dt.timedelta(days=7)
+    calls = []
+
+    class Drafter:
+        def followup(self, *args):
+            calls.append(True)
+            raise Crash()
+
+    rig.desk.drafter = Drafter()
+    with pytest.raises(Crash):
+        rig.desk.followups()
+    rig.store.close()
+    rig.restart().tick(poll=False)
+    card = rig.card(PAT)
+    assert len(calls) == 1 and card["kind"] == "followup" and card["message_id"]
+
+
+def test_a_redelivered_edit_tap_never_repeats_an_uncertain_prompt(rig, monkeypatch):
+    card = interested(rig)
+    original = rig.tg.send_text
+
+    def crash(text, force_reply=False):
+        original(text, force_reply)
+        raise Crash()
+
+    monkeypatch.setattr(rig.tg, "send_text", crash)
+    rig.tg.tap(card["id"], "edit")
+    with pytest.raises(Crash):
+        rig.desk.tick(poll=False)
+    monkeypatch.setattr(rig.tg, "send_text", original)
+    rig.store.close()
+    rig.restart().tick(poll=False)
+    assert len(rig.tg.texts) == 1
+
+
+@pytest.mark.parametrize("bad", [{"id": "in-2", "ue_type": 2},
+                                  {"id": "in-2", "ue_type": "2", "timestamp_created": "2026-10-21T13:59:00Z"},
+                                  {"id": "in-2", "ue_type": 99}])
+def test_malformed_metadata_alongside_the_original_reply_blocks_sending(rig, monkeypatch, bad):
+    card = interested(rig)
+    target = rig.inbox.emails["in-1"]
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: [target, bad])
+    assert tap(rig, card)["state"] == "pending" and not rig.inbox.sent
+
+
+def test_model_rendering_failure_uses_rules_without_repeating_the_call(rig):
+    from reply_desk.classify import Verdict
+
+    calls = []
+
+    class Drafter:
+        def classify(self, reply, verdict):
+            calls.append(True)
+            return Verdict("question", "question", "model", "Answer\n{signature:invalid}")
+
+    rig.desk.drafter = Drafter()
+    rig.inbox.add_inbound(PAT, "What does it cost?")
+    rig.desk.tick()
+    rig.desk.tick(poll=False)
+    card = rig.card(PAT)
+    assert "A flat monthly fee." in card["draft"] and len(calls) == 1
+
+
+def test_followup_rendering_failure_keeps_the_saved_rule_draft(rig):
+    tap(rig, interested(rig))
+    rig.clock.t += dt.timedelta(days=7)
+
+    class Drafter:
+        def followup(self, *args):
+            return "Checking in\n{signature:invalid}"
+
+    rig.desk.drafter = Drafter()
+    rig.desk.followups()
+    card = rig.card(PAT)
+    assert card["kind"] == "followup" and "Just checking this reached you" in card["draft"]
+    assert "{signature" not in card["draft"]

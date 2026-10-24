@@ -70,9 +70,12 @@ def draft_problem(draft: str, label: str, need_page: bool) -> str | None:
     try:
         fields = template_fields(draft)
     except ValueError:
-        return "it had stray braces"
+        return "it had unsupported template syntax"
     if fields - ALLOWED_TOKENS:
         return "it used unknown placeholders"
+    remaining = re.sub(r"\{(?:page_url|booking_url|signature)\}", "", draft)
+    if "{" in remaining or "}" in remaining:
+        return "it used unsupported placeholder syntax"
     if "signature" not in fields:
         return "it had no {signature}"
     if need_page and label == "interested" and "page_url" not in fields:
@@ -86,7 +89,7 @@ class ModelDrafter:
         if client is None:
             import anthropic  # the `llm` extra
 
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(max_retries=0)
         self.client = client
 
     def _ask(self, system: str, content: str, schema: dict[str, Any]) -> dict[str, Any]:

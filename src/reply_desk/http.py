@@ -8,6 +8,7 @@ URL path (Telegram puts it there) can't reach a log, a card or the terminal.
 from __future__ import annotations
 
 import json
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,9 +21,10 @@ USER_AGENT = "reply-desk/0.1 (+https://github.com/alvarezdaymion/reply-desk)"
 
 
 class HttpError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, retry_after: float | None = None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None,
@@ -60,20 +62,11 @@ class Http:
         except ValueError:
             data = None
         if status >= 400:
-            raise HttpError("%s returned HTTP %d%s" % (label, status, _detail(data)), status)
+            parameters = data.get("parameters") if isinstance(data, dict) else None
+            delay = parameters.get("retry_after") if isinstance(parameters, dict) else None
+            if not isinstance(delay, (int, float)) or not math.isfinite(delay) or delay <= 0:
+                delay = None
+            raise HttpError("%s returned HTTP %d" % (label, status), status, delay)
         if data is None:
             raise HttpError("%s returned a body that is not JSON" % label, status)
         return data
-
-
-def _detail(data: Any) -> str:
-    """A short provider message, if the error body has one. Never the request itself."""
-    if not isinstance(data, dict):
-        return ""
-    for key in ("message", "description", "error"):
-        value = data.get(key)
-        if isinstance(value, dict):
-            value = value.get("message")
-        if isinstance(value, str) and value.strip():
-            return ": " + value.strip()[:160]
-    return ""

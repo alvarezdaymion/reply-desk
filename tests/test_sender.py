@@ -162,3 +162,28 @@ def test_readback_matching_ignores_markup_but_not_words():
     assert mismatch(msg, email, "m2") == "a different message came back"
     assert normalize("<p>a</p><p>b</p>") == "a b"
     assert addresses([{"address": "X@example.com"}]) == {"x@example.com"}
+
+
+@pytest.mark.parametrize("body", ["Use <reference-1> in your reply.", "Literal &amp; text.", "Hi <lead@example.com>."])
+def test_readback_keeps_literal_plaintext(tmp_path, body):
+    import html
+
+    sender, store, inbox, clock, email = setup(tmp_path)
+    email["body"] = body
+    r = sender.send("reply:1", email)
+    assert r.state == "confirmed"
+    message = inbox.get_email(store.send(r.send_id)["provider_id"])
+    message["body"] = {"text": body, "html": html.escape(body)}
+    assert mismatch(message, email, message["id"]) == ""
+    message["body"] = {"html": html.escape(body)}
+    assert mismatch(message, email, message["id"]) == ""
+
+
+def test_a_removed_plaintext_reference_cannot_confirm(tmp_path):
+    sender, store, inbox, clock, email = setup(tmp_path)
+    email["body"] = "Use <reference-1> in your reply."
+    send_id = store.create_intent("reply:1", None, email)
+    response = inbox.send_reply(reply_to_id=email["reply_to_id"], sender=OURS, subject=email["subject"],
+                                 body="Use in your reply.")
+    store.move_send(send_id, "accepted", ("intent",), "accepted", provider_id=response["id"])
+    assert sender.confirm(send_id).state == "locked"

@@ -86,11 +86,11 @@ def mismatch(msg: dict[str, Any], email: dict[str, Any], provider_id: str) -> st
     if str(msg.get("subject") or "").strip() != str(email["subject"]).strip():
         return "subject differs"
     body = msg.get("body")
-    variants = [body[k] for k in ("text", "html") if body.get(k)] if isinstance(body, dict) else []
+    variants = [(k, body[k]) for k in ("text", "html") if body.get(k)] if isinstance(body, dict) else []
     if not variants:
         return "the readback has no body"
-    expected = normalize(str(email["body"]))
-    if any(normalize(str(v)) != expected for v in variants):
+    expected = " ".join(str(email["body"]).split())
+    if any((normalize(str(v)) if k == "html" else " ".join(str(v).split())) != expected for k, v in variants):
         return "body differs"
     return ""
 

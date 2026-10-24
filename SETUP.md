@@ -17,9 +17,9 @@ Run `uv run reply-desk init` to create `reply-desk.toml`, then ask:
 1. **Business name and signature.** The signature ends every draft.
 2. **Booking link** (optional). Drafts and pages show it when it is set.
 3. **The page.** What an interested lead should see: a headline, one or two short paragraphs, a few bullet points. Placeholders `{first_name}`, `{company}` and `{business}` work in each.
-4. **Canned answers.** The questions leads ask most (price, process, location, timing) and the owner's answer to each, as `[[answers]]` with keywords. A question with no match gets a draft that must be edited before it can be sent.
+4. **Canned answers.** The questions leads ask most (price, process, location, timing) and the owner's answer to each, as `[[answers]]` with keywords and complete plain text, without placeholders. A question with no match gets a draft that must be edited before it can be sent.
 5. **Draft wording.** Show them `[drafts]`. Keep each placeholder on the line it belongs to: a line whose placeholder is empty is left out.
-6. **Follow-ups.** Default gaps are 2, 4 and 7 days; `gaps_days = []` turns them off. Set `send_hour` and `timezone` (an IANA name such as `"America/Chicago"`).
+6. **Follow-ups.** Default gaps are 2, 4 and 7 days; `gaps_days = []` turns them off, cancels existing scheduled follow-ups and closes their pending approval cards. Set `send_hour` and `timezone` (UTC by default, or an IANA name such as `"America/Chicago"` to follow daylight-saving changes). An empty time zone is rejected.
 7. **Campaigns.** Watch all Instantly campaigns, or only the ones listed in `[inbox] campaign_ids`.
 
 Done when `uv run reply-desk check` prints "Config OK" (it also lists which credentials are still missing).
@@ -47,15 +47,19 @@ Each interested lead gets `site/<slug>/index.html`, and its URL is `<base_url>/<
 
 Done when `uv run reply-desk check --page` publishes a test page and prints "HTTP 200 and the page marker matched". It leaves one noindex test page on the host.
 
+The desk saves each lead page's URL and marker before running a deploy command, and never repeats an uncertain command automatically. If a deploy fails or is interrupted, later ticks only check the saved URL. Check the deployment by hand if it never becomes live.
+
 ## 6. Run in dry-run
 
 Start `uv run reply-desk run --loop` in a terminal and have the owner reply to one of their own campaign emails from a personal address (or wait for a real reply). Check together:
 
 - the card arrives in Telegram with a sensible label, reason and draft;
-- Edit, then replying to the bot's message, changes the draft;
+- Edit, then replying to the bot's message, changes the draft; wait for the updated card before tapping its new Send button. Drafts over 2,500 characters and unresolved named placeholders are refused;
 - after Send, the card says "Dry run: every check passed and nothing was sent."
 
 Then install the service from `examples/scheduling/` (systemd on Linux, launchd on macOS, or cron for one tick a minute), replacing `/path/to/reply-desk` and `/path/to/uv` (`which uv`). Done when `uv run reply-desk status` shows the replies and cards you expect.
+
+Incomplete reply bodies wait for retrieval before any draft is made. A failed or interrupted Telegram card post is locked and never reposted automatically, since Telegram may have accepted it. `status` lists these cards; check Telegram and answer the lead by hand. In loop mode, API failures back off and honor provider retry delays.
 
 ## 7. Go live, only when the owner asks
 
@@ -63,10 +67,12 @@ Set `[sending] mode = "live"` and restart the service. Explain before they tap S
 
 - each reply and each follow-up step is sent at most once; a second tap does nothing;
 - after a send, the card says "Sent once and confirmed" once a readback matches;
-- a send the desk can't confirm says LOCKED. Nothing is retried. They check the sent folder in Instantly and run `uv run reply-desk resolve <id> --sent` or `--not-sent`, or `uv run reply-desk resolve --recheck` to read every locked send back once more. If it did not go out and still needs an answer, they reply by hand.
+- a send the desk can't confirm says LOCKED. Nothing is retried. Stop the service (or pause its scheduler) first, since `run --loop` holds the state-directory lock. Check the sent folder in Instantly and run `uv run reply-desk resolve <id> --sent` or `--not-sent`, or `uv run reply-desk resolve --recheck` to read every locked send back once more, then restart the service. If it did not go out and still needs an answer, reply by hand.
 
 Do not change `src/reply_desk/sender.py` or the checks in `desk.py` to get a send through. A locked send is the system working as designed.
 
 ## 8. Optional: model drafts
 
 If the owner wants drafts that read the whole reply: `uv sync --extra llm`, put `ANTHROPIC_API_KEY` in `.env`, set `[model] enabled = true` and write `[business] facts` (the only facts the model may state). It costs one model call per new reply and one per due follow-up; tell them that is the only metered cost. Model drafts go to the same cards and pass the same checks, and the rules take over whenever an answer looks wrong.
+
+Rule decisions and follow-up drafts are saved before model calls, and SDK retries are disabled. If the process stops during a call, recovery uses the rules instead of repeating the paid request.

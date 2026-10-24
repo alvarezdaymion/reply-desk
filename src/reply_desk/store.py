@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS replies (
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS replies (
     inbox TEXT NOT NULL,
     subject TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL DEFAULT '',
+    body_complete INTEGER NOT NULL DEFAULT 1,
     received_at TEXT NOT NULL,
     auto_reply INTEGER NOT NULL DEFAULT 0,
     first_name TEXT NOT NULL DEFAULT '',
@@ -57,6 +58,8 @@ CREATE TABLE IF NOT EXISTS cards (
     state TEXT NOT NULL DEFAULT 'pending'
         CHECK (state IN ('pending', 'sending', 'sent', 'locked', 'skipped', 'stale', 'dry_run', 'closed')),
     message_id TEXT,
+    post_state TEXT NOT NULL DEFAULT 'unposted' CHECK (post_state IN ('unposted', 'posting', 'posted', 'locked')),
+    reviewed_draft TEXT,
     edit_prompt_id TEXT,
     note TEXT,
     created_at TEXT NOT NULL,
@@ -137,6 +140,16 @@ class Store:
         if version == 0:
             self.db.executescript("BEGIN IMMEDIATE;\n%s\nPRAGMA user_version = %d;\nCOMMIT;"
                                   % (SCHEMA, SCHEMA_VERSION))
+        elif version == 1:
+            self.db.executescript("""BEGIN IMMEDIATE;
+                ALTER TABLE replies ADD COLUMN body_complete INTEGER NOT NULL DEFAULT 1;
+                ALTER TABLE cards ADD COLUMN post_state TEXT NOT NULL DEFAULT 'unposted'
+                    CHECK (post_state IN ('unposted', 'posting', 'posted', 'locked'));
+                ALTER TABLE cards ADD COLUMN reviewed_draft TEXT;
+                UPDATE cards SET post_state = CASE WHEN message_id IS NULL THEN 'locked' ELSE 'posted' END,
+                    reviewed_draft = CASE WHEN message_id IS NOT NULL THEN draft END;
+                PRAGMA user_version = 2;
+                COMMIT;""")
 
     def close(self) -> None:
         self.db.close()
@@ -189,6 +202,11 @@ class Store:
         self.db.execute("INSERT INTO kv (key, value) VALUES (?, ?)"
                         " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
+    def claim_edit_callback(self, callback_id: str) -> bool:
+        cur = self.db.execute("INSERT OR IGNORE INTO kv (key, value) VALUES (?, 'claimed')",
+                              ("telegram.edit:" + callback_id,))
+        return cur.rowcount == 1
+
     # ---- replies -------------------------------------------------------------------------------
 
     def add_reply(self, r: dict[str, Any]) -> int | None:
@@ -197,9 +215,11 @@ class Store:
         with self.tx() as c:
             cur = c.execute(
                 "INSERT OR IGNORE INTO replies (provider_id, thread_id, lead_email, inbox, subject, body, received_at,"
-                " auto_reply, first_name, company, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " body_complete, auto_reply, first_name, company, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (r["provider_id"], r.get("thread_id", ""), r["lead_email"].lower(), r["inbox"], r.get("subject", ""),
-                 r.get("body", ""), r["received_at"], int(bool(r.get("auto_reply"))), r.get("first_name", ""),
+                 r.get("body", ""), r["received_at"], int(not r.get("truncated")),
+                 int(bool(r.get("auto_reply"))), r.get("first_name", ""),
                  r.get("company", ""), now, now))
             if cur.rowcount != 1:
                 return None
@@ -216,9 +236,12 @@ class Store:
         marks = ", ".join("?" for _ in statuses)
         return self._all("SELECT * FROM replies WHERE status IN (%s) ORDER BY received_at, id" % marks, statuses)
 
-    def update_reply(self, reply_id: int, **fields: Any) -> None:
+    def update_reply(self, reply_id: int, from_: tuple[str, ...] = ("new", "waiting_page"), **fields: Any) -> bool:
         sets = ", ".join(["updated_at = ?"] + ["%s = ?" % k for k in fields])
-        self.db.execute("UPDATE replies SET %s WHERE id = ?" % sets, (self.now(), *fields.values(), reply_id))
+        marks = ", ".join("?" for _ in from_)
+        cur = self.db.execute("UPDATE replies SET %s WHERE id = ? AND status IN (%s)" % (sets, marks),
+                              (self.now(), *fields.values(), reply_id, *from_))
+        return cur.rowcount == 1
 
     # ---- cards ---------------------------------------------------------------------------------
 
@@ -257,13 +280,37 @@ class Store:
                 self.log("card." + to, card_id, note, c)
             return moved
 
-    def claim_card(self, card_id: str) -> bool:
+    def claim_card(self, card_id: str, expected_draft: str | None = None) -> bool:
         """pending -> sending. Exactly one tap wins; every later tap gets False."""
+        if expected_draft is not None:
+            with self.tx() as c:
+                cur = c.execute("UPDATE cards SET state = 'sending', updated_at = ?, note = 'send tapped'"
+                                " WHERE id = ? AND state = 'pending' AND draft = ?",
+                                (self.now(), card_id, expected_draft))
+                if cur.rowcount == 1:
+                    self.log("card.sending", card_id, "send tapped", c)
+                return cur.rowcount == 1
         return self.move_card(card_id, "sending", ("pending",), "send tapped")
 
     def set_card(self, card_id: str, **fields: Any) -> None:
         sets = ", ".join(["updated_at = ?"] + ["%s = ?" % k for k in fields])
         self.db.execute("UPDATE cards SET %s WHERE id = ?" % sets, (self.now(), *fields.values(), card_id))
+
+    def claim_card_post(self, card_id: str) -> bool:
+        with self.tx() as c:
+            cur = c.execute("UPDATE cards SET post_state = 'posting' WHERE id = ? AND state = 'pending'"
+                            " AND post_state = 'unposted' AND message_id IS NULL", (card_id,))
+            return cur.rowcount == 1
+
+    def finish_card_post(self, card_id: str, message_id: str | None, draft: str, note: str = "") -> None:
+        with self.tx() as c:
+            c.execute("UPDATE cards SET post_state = ?, message_id = ?, reviewed_draft = ?, note = ?"
+                      " WHERE id = ? AND post_state = 'posting'",
+                      ("posted" if message_id else "locked", message_id, draft if message_id else None, note, card_id))
+
+    def mark_card_reviewed(self, card_id: str, draft: str) -> None:
+        self.db.execute("UPDATE cards SET reviewed_draft = ? WHERE id = ? AND draft = ?"
+                        " AND post_state = 'posted' AND state = 'pending'", (draft, card_id, draft))
 
     def edit_draft(self, card_id: str, draft: str) -> bool:
         with self.tx() as c:
@@ -357,6 +404,13 @@ class Store:
             if cur.rowcount:
                 self.log("followup.cancelled", lead_email.lower(), "%d: %s" % (cur.rowcount, reason), c)
             return cur.rowcount
+
+    def disable_followups(self) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE followups SET state = 'cancelled', note = 'follow-ups disabled', updated_at = ?"
+                      " WHERE state IN ('scheduled', 'carded')", (self.now(),))
+            c.execute("UPDATE cards SET state = 'closed', note = 'follow-ups disabled', updated_at = ?"
+                      " WHERE kind = 'followup' AND state = 'pending'", (self.now(),))
 
     # ---- suppression ---------------------------------------------------------------------------
 

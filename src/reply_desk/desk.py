@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import json
 import time
 from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
 from . import drafts, pages, timing
-from .cards import buttons, card_text
+from .cards import buttons, card_text, revision
 from .classify import authored_text, classify
 from .connectors.instantly import reply_from_item
 from .sender import SafeSender, parse_ts, short
@@ -54,11 +55,19 @@ def reply_subject(subject: str) -> str:
 def newer_inbound(thread: list[dict[str, Any]], reply: dict[str, Any]) -> dict[str, Any] | None:
     """A message the person sent after `reply` (auto-replies don't count)."""
     received = parse_ts(reply["received_at"])
+    if not received or not any(m.get("id") == reply["provider_id"] for m in thread):
+        raise ValueError("the thread is missing the original reply")
     for m in thread:
-        if m.get("ue_type") != 2 or str(m.get("id")) == reply["provider_id"] or m.get("is_auto_reply") in (1, True):
+        if not m.get("id") or type(m.get("ue_type")) is not int or m["ue_type"] not in (1, 2, 3):
+            raise ValueError("the thread has incomplete message metadata")
+        if m.get("ue_type") != 2:
             continue
         created = parse_ts(m.get("timestamp_created"))
-        if created and received and created > received:
+        if not created:
+            raise ValueError("the thread has an invalid received timestamp")
+        if str(m["id"]) == reply["provider_id"] or m.get("is_auto_reply") in (1, True):
+            continue
+        if created >= received:
             return m
     return None
 
@@ -101,6 +110,7 @@ class Desk:
     def tick(self, updates_timeout: int = 0, poll: bool = True) -> dict[str, Any]:
         self.stats = Counter()
         errors = []
+        retry_after = 0.0
         steps: list[tuple[str, Callable[[], None]]] = [("recover", self.recover), ("triage", self.triage),
                                                        ("taps", lambda: self.taps(updates_timeout)),
                                                        ("follow-ups", self.followups)]
@@ -112,21 +122,28 @@ class Desk:
             except Exception as e:
                 errors.append("%s: %s" % (name, short(e)))
                 self.store.log("tick.error", name, short(e))
-        return {"stats": dict(self.stats), "errors": errors}
+                retry_after = max(retry_after, getattr(e, "retry_after", None) or 0.0)
+        return {"stats": dict(self.stats), "errors": errors, "retry_after": retry_after}
 
     def recover(self) -> None:
+        if not self.cfg["followups"]["gaps_days"]:
+            self.store.disable_followups()
         settled = len(self.sender.recover())
         if settled:
             self.stats["recovered"] += settled
-        for card in self.store.cards("sending"):
+        for card in self.store.cards("sending", "locked"):
             row = self.store.send_by_key(self.key(card))
             if row is None:
                 if self.store.move_card(card["id"], "pending", ("sending",), "restarted before anything was sent"):
                     self._refresh(card["id"], "The desk restarted before sending. Nothing was sent; tap Send again.")
-            else:
+            elif card["state"] == "sending" or row["state"] != "locked":
                 self._settle(card, row["state"], row["note"] or "", row["id"])
+        for card in self.store.cards("sent"):
+            self._arm(card)
         for card in self.store.cards("pending"):
-            if not card["message_id"]:
+            if card["post_state"] == "posting":
+                self.store.finish_card_post(card["id"], None, card["draft"], "card post outcome unclear; check by hand")
+            elif card["post_state"] == "unposted":
                 self._post(card)
 
     def poll(self) -> None:
@@ -134,8 +151,31 @@ class Desk:
         lookback = dt.timedelta(hours=float(self.cfg["inbox"]["lookback_hours"]))
         since = (cursor - POLL_OVERLAP) if cursor else self.clock() - lookback
         campaigns = {str(c) for c in self.cfg["inbox"]["campaign_ids"]}
-        newest = cursor
-        for item in self.inbox.list_replies(zulu(since)):
+        if not hasattr(self.inbox, "list_reply_page"):
+            newest = self._store_replies(self.inbox.list_replies(zulu(since)), campaigns, cursor)
+            if newest:
+                self.store.put("inbox.cursor", iso(newest))
+            return
+        progress = json.loads(self.store.get("inbox.pagination") or "null") or {
+            "since": zulu(since), "after": "", "newest": iso(cursor) if cursor else ""}
+        seen = {progress["after"]}
+        for _ in range(3):
+            items, nxt = self.inbox.list_reply_page(progress["since"], progress["after"])
+            if nxt and nxt in seen:
+                raise ValueError("Instantly list replies returned a repeated cursor")
+            newest = self._store_replies(items, campaigns, parse_ts(progress["newest"]))
+            progress.update(after=nxt, newest=iso(newest) if newest else "")
+            if not nxt:
+                if newest:
+                    self.store.put("inbox.cursor", iso(newest))
+                self.store.put("inbox.pagination", "null")
+                return
+            seen.add(nxt)
+            self.store.put("inbox.pagination", json.dumps(progress))
+
+    def _store_replies(self, items: list[dict[str, Any]], campaigns: set[str],
+                       newest: dt.datetime | None) -> dt.datetime | None:
+        for item in items:
             if item.get("ue_type") not in (None, 2):  # only what people sent us
                 continue
             r = reply_from_item(item)
@@ -145,19 +185,13 @@ class Desk:
             newest = max(newest or created, created)
             if (campaigns and r["campaign_id"] not in campaigns) or self.store.has_reply(r["provider_id"]):
                 continue
-            if r["truncated"]:
-                try:
-                    r["body"] = reply_from_item(self.inbox.get_email(r["provider_id"]))["body"]
-                except Exception as e:  # keep the excerpt; the card shows what arrived
-                    self.store.log("reply.body_fetch_failed", r["provider_id"], short(e))
             try:
                 r.update(self.inbox.lead(r["lead_email"]))
             except Exception as e:
                 self.store.log("lead.lookup_failed", r["lead_email"], short(e))
             if self.store.add_reply({**r, "received_at": iso(created)}):
                 self.stats["replies"] += 1
-        if newest:
-            self.store.put("inbox.cursor", iso(newest))
+        return newest
 
     # ---- triage --------------------------------------------------------------------------------
 
@@ -168,15 +202,25 @@ class Desk:
             except Exception as e:
                 attempts = reply["attempts"] + 1
                 failed = attempts >= 3
-                self.store.update_reply(reply["id"], attempts=attempts, note=short(e),
-                                        status="failed" if failed else reply["status"])
+                fields = {"status": "failed"} if failed else {}
+                moved = self.store.update_reply(reply["id"], attempts=attempts, note=short(e), **fields)
                 self.store.log("triage.error", reply["id"], short(e))
-                if failed:
+                if failed and moved:
                     self._notify("No card for the reply from %s: %s. Answer it by hand."
                                  % (reply["lead_email"], short(e)))
 
     def _triage(self, reply: dict[str, Any]) -> None:
         lead = reply["lead_email"]
+        if not reply["body_complete"]:
+            try:
+                full = reply_from_item(self.inbox.get_email(reply["provider_id"]))
+                if full["provider_id"] != reply["provider_id"] or full["truncated"] or not full["body"].strip():
+                    raise ValueError("the full reply body is still unavailable")
+            except Exception as e:
+                self.store.log("reply.body_fetch_failed", reply["provider_id"], short(e))
+                return
+            self.store.update_reply(reply["id"], body=full["body"], body_complete=1)
+            reply = self.store.reply(reply["id"]) or reply
         if reply["status"] == "new":
             if self.store.is_suppressed(lead) or reply["auto_reply"]:
                 why = "this address unsubscribed" if self.store.is_suppressed(lead) else "auto-reply"
@@ -184,16 +228,18 @@ class Desk:
                 self.stats["ignored"] += 1
                 return
             verdict = classify(reply["body"])
+            self.store.update_reply(reply["id"], label=verdict.label, draft=None, status="waiting_page",
+                                    reason="%s (%s)" % (verdict.reason, verdict.source))
             if self.drafter is not None:
                 verdict = self.drafter.classify(reply, verdict)
             self.store.update_reply(reply["id"], label=verdict.label, draft=verdict.draft,
                                     reason="%s (%s)" % (verdict.reason, verdict.source))
             if self.store.cancel_followups(lead, "they replied"):
                 self.stats["followups_cancelled"] += 1
-            if verdict.label == "unsubscribe":
-                self._unsubscribe(reply)
-                return
             reply = self.store.reply(reply["id"]) or reply
+        if reply["label"] == "unsubscribe":
+            self._unsubscribe(reply)
+            return
         if reply["label"] == "interested" and self.cfg["pages"]["enabled"] and not self._page_ready(reply):
             return
         card = self.store.create_card(reply["id"], "reply", self._reply_draft(self.store.reply(reply["id"]) or reply))
@@ -202,9 +248,10 @@ class Desk:
     def _page_ready(self, reply: dict[str, Any]) -> bool:
         """Build and publish the page once, then check it is live. False holds the card back."""
         if not reply["page_url"]:
-            page, note = pages.build(self.cfg, reply, self.publisher)
+            page = pages.prepare(self.cfg, reply)
             self.store.update_reply(reply["id"], page_url=page.url, page_marker=page.marker)
             reply = {**reply, "page_url": page.url, "page_marker": page.marker}
+            note = self.publisher.publish(self.cfg.site_dir, page.slug)
             self.say("page for %s: %s (%s)" % (reply["lead_email"], page.url, note))
         ok, why = pages.check_live(reply["page_url"], reply["page_marker"], self.fetch)
         if ok:
@@ -223,7 +270,10 @@ class Desk:
     def _reply_draft(self, reply: dict[str, Any]) -> str:
         values = drafts.values_for(self.cfg, reply)
         if reply["draft"]:
-            return drafts.fill(reply["draft"], values)
+            try:
+                return drafts.fill(reply["draft"], values)
+            except (ValueError, KeyError, IndexError):
+                self.store.update_reply(reply["id"], draft=None)
         text = authored_text(reply["body"])
         return drafts.reply_draft(self.cfg, reply, reply["label"], self._hint(reply), text) or ""
 
@@ -275,14 +325,18 @@ class Desk:
             self.store.log("tap.refused", (cq.get("from") or {}).get("id", ""), "chat %s" % chat)
             return self._answer(cq, "Not allowed.")
         parts = str(cq.get("data") or "").split(":")
-        card = self.store.card(parts[2]) if len(parts) == 3 and parts[0] == "rd" else None
+        card = self.store.card(parts[2]) if len(parts) in (3, 4) and parts[0] == "rd" else None
         if card is None or parts[1] not in ("send", "edit", "skip"):
             return self._answer(cq, "Unknown button.")
+        if parts[1] == "send" and card["state"] == "pending":
+            if len(parts) != 4 or parts[3] != revision(card["draft"]):
+                self._refresh(card["id"], "Review the current draft, then tap its Send button.")
+                return self._answer(cq, "The draft changed. Review the current card before sending.")
         self.stats["taps"] += 1
         {"send": self.on_send, "edit": self.on_edit, "skip": self.on_skip}[parts[1]](card, cq)
 
     def on_send(self, card: dict[str, Any], cq: dict[str, Any]) -> None:
-        if not self.store.claim_card(card["id"]):
+        if not self.store.claim_card(card["id"], expected_draft=card["draft"]):
             current = self.store.card(card["id"]) or card
             self.stats["repeat_taps"] += 1
             self.store.log("tap.repeat", card["id"], "card was %s" % current["state"])
@@ -295,9 +349,15 @@ class Desk:
     def _deliver(self, card: dict[str, Any]) -> None:
         reply = self.store.reply(card["reply_id"])
         assert reply is not None
+        if card["kind"] == "followup" and not self.cfg["followups"]["gaps_days"]:
+            return self._settle(card, "closed", "follow-ups are disabled; nothing was sent")
         problem = drafts.check(card["draft"])
         if problem:
             return self._back_to_pending(card, problem)
+        if not reply["body_complete"]:
+            return self._back_to_pending(card, "the full reply body is unavailable; nothing was sent")
+        if card["post_state"] != "posted" or card["reviewed_draft"] != card["draft"]:
+            return self._back_to_pending(card, "this draft has not been displayed in full; nothing was sent")
         if self.store.is_suppressed(reply["lead_email"]):
             return self._settle(card, "closed", "this address unsubscribed; nothing was sent")
         if reply["page_url"] and reply["page_url"] in card["draft"]:
@@ -306,9 +366,10 @@ class Desk:
                 return self._back_to_pending(card, "the page is not live (%s); nothing was sent" % why)
         try:
             thread = self.inbox.thread(reply["thread_id"], reply["lead_email"])
+            newer = newer_inbound(thread, reply)
         except Exception as e:
             return self._back_to_pending(card, "the thread could not be read (%s); nothing was sent" % short(e))
-        if newer_inbound(thread, reply):
+        if newer:
             return self._settle(card, "stale", "they wrote again, so this draft is out of date; nothing was sent")
         if not self.cfg.live:
             return self._settle(card, "dry_run", "dry run: every check passed and nothing was sent")
@@ -331,6 +392,9 @@ class Desk:
     def on_edit(self, card: dict[str, Any], cq: dict[str, Any]) -> None:
         if card["state"] != "pending":
             return self._answer(cq, "This card is closed.")
+        callback_id = str(cq.get("id") or "")
+        if not callback_id or not self.store.claim_edit_callback(callback_id):
+            return self._answer(cq, "This request was already handled. Tap Edit again if no prompt arrived.")
         reply = self.store.reply(card["reply_id"]) or {}
         prompt = self.notifier.send_text("Reply to this message with the new email text for %s."
                                          % html.escape(reply.get("lead_email", "this lead")), force_reply=True)
@@ -400,8 +464,8 @@ class Desk:
         self.stats[{"sent": "confirmed"}.get(to, to)] += 1
         status = {
             "sent": "Sent once and confirmed: %s." % detail,
-            "locked": "LOCKED: %s. Check the sent folder, then run: reply-desk resolve %s --sent (or --not-sent)"
-                      % (detail, send_id),
+            "locked": "LOCKED: %s. Stop the service, check the sent folder, then run: "
+                      "reply-desk resolve %s --sent (or --not-sent), then restart the service" % (detail, send_id),
         }.get(to, detail[:1].upper() + detail[1:] + ".")
         self._refresh(card["id"], status)
         self.say("%s: %s" % (self._who(card), status))
@@ -409,7 +473,7 @@ class Desk:
             self.store.move_followup(card["followup_id"], "cancelled" if to == "stale" else "done",
                                      ("carded",), detail)
         if to == "sent":
-            self._arm(card)
+            self._arm(self.store.card(card["id"]) or card)
 
     def _arm(self, card: dict[str, Any]) -> None:
         """Schedule the next follow-up after a confirmed send, timed to what the person wrote."""
@@ -417,7 +481,7 @@ class Desk:
         reply = self.store.reply(card["reply_id"])
         if not gaps or reply is None:
             return
-        now = self.clock().astimezone(self.tz)
+        now = (parse_ts(card["updated_at"]) or self.clock()).astimezone(self.tz)
         if card["kind"] == "reply":
             hint = self._hint(reply)
             if reply["label"] == "not_now" and hint is None:
@@ -448,6 +512,9 @@ class Desk:
 
     def followups(self) -> None:
         total = len(self.cfg["followups"]["gaps_days"])
+        if not total:
+            self.store.disable_followups()
+            return
         for f in self.store.due_followups(self.clock()):
             reply = self.store.reply(f["reply_id"])
             assert reply is not None
@@ -456,18 +523,25 @@ class Desk:
                 continue
             try:
                 thread = self.inbox.thread(reply["thread_id"], reply["lead_email"])
+                newer = newer_inbound(thread, reply)
             except Exception as e:
                 self.store.log("followup.thread_failed", f["id"], short(e))
                 continue  # try again next tick
-            if newer_inbound(thread, reply):
+            if newer:
                 self.store.move_followup(f["id"], "cancelled", ("scheduled",), "they replied")
                 self.stats["followups_cancelled"] += 1
                 continue
+            fallback = drafts.followup_draft(self.cfg, reply, f["step"], total, f["hint"])
+            card = self.store.create_card(reply["id"], "followup", fallback, followup_id=f["id"])
             draft = self.drafter.followup(reply, thread, f["step"], total, f["why"]) if self.drafter else None
             values = drafts.values_for(self.cfg, reply)
-            text = drafts.fill(draft, values) if draft else drafts.followup_draft(self.cfg, reply, f["step"], total,
-                                                                                    f["hint"])
-            self._post(self.store.create_card(reply["id"], "followup", text, followup_id=f["id"]))
+            try:
+                text = drafts.fill(draft, values) if draft else ""
+            except (ValueError, KeyError, IndexError):
+                text = ""
+            if text:
+                self.store.edit_draft(card["id"], text)
+            self._post(self.store.card(card["id"]) or card)
             self.stats["followups_carded"] += 1
 
     # ---- cards and messages --------------------------------------------------------------------
@@ -479,8 +553,17 @@ class Desk:
         return card_text(card, reply, followup, len(self.cfg["followups"]["gaps_days"]), status)
 
     def _post(self, card: dict[str, Any]) -> None:
-        message_id = self.notifier.send_card(self._render(card), buttons(card["id"]))
-        self.store.set_card(card["id"], message_id=message_id)
+        text = self._render(card)
+        if not self.store.claim_card_post(card["id"]):
+            return
+        try:
+            message_id = self.notifier.send_card(text, buttons(card["id"], card["draft"]))
+            if not isinstance(message_id, str) or not message_id.strip():
+                raise ValueError("Telegram returned no message ID")
+        except Exception as e:
+            self.store.finish_card_post(card["id"], None, card["draft"], "card post outcome unclear: " + short(e))
+            raise
+        self.store.finish_card_post(card["id"], message_id, card["draft"])
         self.stats["cards"] += 1
 
     def _refresh(self, card_id: str, status: str) -> None:
@@ -489,7 +572,8 @@ class Desk:
             return
         try:
             self.notifier.update_card(card["message_id"], self._render(card, status),
-                                      buttons(card_id) if card["state"] == "pending" else ())
+                                      buttons(card_id, card["draft"]) if card["state"] == "pending" else ())
+            self.store.mark_card_reviewed(card_id, card["draft"])
         except Exception as e:
             self.store.log("card.refresh_failed", card_id, short(e))
 

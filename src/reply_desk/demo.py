@@ -149,12 +149,15 @@ class ConsoleNotifier:
         self.out = out
         self.queue: list[dict[str, Any]] = []
         self.next_update, self.next_message, self.full_cards = 1, 500, 1
+        self.callbacks: dict[str, str] = {}
 
     def _id(self) -> str:
         self.next_message += 1
         return str(self.next_message)
 
     def send_card(self, text: str, buttons: Any) -> str:
+        for _, data in buttons:
+            self.callbacks[data.rsplit(":", 1)[0]] = data
         lines = [x for x in plain(text).split("\n") if x.strip()]
         if self.full_cards > 0:  # the first card in full, as Telegram shows it
             self.full_cards -= 1
@@ -169,7 +172,8 @@ class ConsoleNotifier:
         return self._id()
 
     def update_card(self, message_id: str, text: str, buttons: Any = ()) -> None:
-        pass  # the desk's own lines already say what changed
+        for _, data in buttons:
+            self.callbacks[data.rsplit(":", 1)[0]] = data
 
     def send_text(self, text: str, force_reply: bool = False) -> str:
         self.out("  [Telegram] " + plain(text))
@@ -188,7 +192,8 @@ class ConsoleNotifier:
         self.queue.append(update)
 
     def tap(self, card_id: str, action: str) -> None:
-        self._push({"callback_query": {"id": "cb-%d" % self.next_update, "data": "rd:%s:%s" % (action, card_id),
+        prefix = "rd:%s:%s" % (action, card_id)
+        self._push({"callback_query": {"id": "cb-%d" % self.next_update, "data": self.callbacks.get(prefix, prefix),
                                        "from": {"id": 1}, "message": {"chat": {"id": self.chat_id}}}})
 
     def reply(self, to_message: str, text: str) -> None:
@@ -272,6 +277,7 @@ def run(root: Path, out: Callable[[str], None] = print) -> int:
     act(desk, "Edit on Alex's card", ("alex@example.org", "edit"))
     prompt = desk.store.card(card_for(desk, "alex@example.org"))["edit_prompt_id"]
     tg.reply(prompt, "Hi Alex,\n\nYes. We work fully online, so location doesn't matter.\n\nSam\nDemo Bookkeeping")
+    desk.tick(poll=False)
     act(desk, "The operator replies to the bot with the answer, then taps Send on Alex's card",
         ("alex@example.org", "send"))
     act(desk, "Skip on Morgan's card", ("morgan@example.org", "skip"))

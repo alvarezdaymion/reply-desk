@@ -91,3 +91,65 @@ def test_run_status_and_resolve_commands(tmp_path, capsys, monkeypatch):
     assert cli.main(["resolve", "1", "--not-sent", "--config", str(path)]) == 0
     assert "send 1 marked not sent" in capsys.readouterr().out
     assert rig.store.card(card["id"])["state"] == "closed" and len(rig.inbox.sent) == 1
+
+
+def test_default_timezone_is_utc_and_empty_timezone_is_rejected(tmp_path):
+    import datetime as dt
+
+    cfg = config.from_dict({}, tmp_path)
+    assert cfg.tz() is dt.UTC
+    with pytest.raises(ValueError, match="time zone"):
+        config.from_dict({"followups": {"timezone": ""}}, tmp_path)
+
+
+def test_resolve_lock_explains_service_stop_and_restart(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    path = tmp_path / "reply-desk.toml"
+    path.write_text("")
+    monkeypatch.setattr(cli, "build_desk", lambda cfg: rig.desk)
+    with cli.run_lock(rig.cfg.state_dir), pytest.raises(SystemExit, match="[Ss]top.*resolve.*restart"):
+        cli.main(["resolve", "1", "--not-sent", "--config", str(path)])
+
+
+def test_loop_backs_off_on_errors_and_respects_retry_delay(tmp_path, monkeypatch):
+    from reply_desk.http import HttpError
+
+    rig = Rig(tmp_path)
+    path = tmp_path / "reply-desk.toml"
+    path.write_text("")
+    calls, sleeps = [], []
+
+    def unavailable(offset, timeout):
+        calls.append(True)
+        if len(calls) == 4:
+            raise KeyboardInterrupt()
+        error = HttpError("rate limited", 429)
+        error.retry_after = 7 if len(calls) == 2 else None
+        raise error
+
+    monkeypatch.setattr(rig.tg, "updates", unavailable)
+    monkeypatch.setattr(cli, "build_desk", lambda cfg, say=print: rig.desk)
+    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
+    assert cli.main(["run", "--loop", "--config", str(path)]) == 0
+    assert sleeps == [1, 7, 4]
+
+
+def test_canned_answers_reject_placeholders(tmp_path):
+    with pytest.raises(ValueError, match="answers.*placeholders"):
+        make_cfg(tmp_path, answers=[{"keywords": ["cost"], "text": "It costs {price}."}])
+
+
+def test_status_lists_uncertain_card_posts(tmp_path, monkeypatch, capsys):
+    from reply_desk.http import HttpError
+    from reply_desk.status import status_lines
+
+    rig = Rig(tmp_path)
+
+    def unavailable(*args):
+        raise HttpError("response lost")
+
+    monkeypatch.setattr(rig.tg, "send_card", unavailable)
+    rig.inbox.add_inbound("lead@example.com", "Tell me more")
+    rig.desk.tick()
+    output = "\n".join(status_lines(rig.store, rig.cfg.tz()))
+    assert "Locked card posts" in output and rig.card("lead@example.com")["id"] in output

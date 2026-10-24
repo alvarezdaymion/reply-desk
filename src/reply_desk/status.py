@@ -25,12 +25,20 @@ def status_lines(store: Store, tz: dt.tzinfo) -> list[str]:
     ]
     locked = store.sends("locked")
     if locked:
-        lines += ["", "Locked sends. Check the sent folder in your email platform, then run one of:",
+        lines += ["", "Locked sends. Stop the service, check the sent folder, then run one of:",
                   "  reply-desk resolve <id> --sent       it went out",
                   "  reply-desk resolve <id> --not-sent   it did not (answer by hand if it still needs one)",
-                  "  reply-desk resolve --recheck         read every locked send back once more"]
+                  "  reply-desk resolve --recheck         read every locked send back once more",
+                  "Restart the service after resolving."]
         for s in locked:
             lines.append("  #%d to %s, \"%s\": %s" % (s["id"], s["recipient"], s["subject"], s["note"] or ""))
+    posts = [card for card in store.cards("pending") if card["post_state"] in ("posting", "locked")]
+    if posts:
+        lines += ["", "Locked card posts. Check Telegram and answer by hand; these posts are never repeated:"]
+        for card in posts:
+            reply = store.reply(card["reply_id"]) or {}
+            lines.append("  %s to %s: %s" % (card["id"], reply.get("lead_email", "?"), card["note"] or
+                                           "post outcome unclear"))
     planned = store.followups("scheduled")
     if planned:
         lines += ["", "Follow-ups planned:"]

@@ -35,7 +35,7 @@ def load_env(path: Path) -> None:
 
 @contextmanager
 def run_lock(state_dir: Path) -> Iterator[None]:
-    """One process at a time per state folder. The ledger is safe without it; this keeps output sane."""
+    """One process at a time per state folder, including manual send resolution."""
     state_dir.mkdir(parents=True, exist_ok=True)
     try:
         import fcntl
@@ -46,7 +46,8 @@ def run_lock(state_dir: Path) -> Iterator[None]:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise SystemExit("another reply-desk process is using %s" % state_dir) from None
+            raise SystemExit("another reply-desk process is using %s. Stop the service before resolve, then restart it."
+                             % state_dir) from None
         yield
 
 
@@ -149,6 +150,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     with run_lock(cfg.state_dir):
         desk = build_desk(cfg, say=(lambda _: None) if args.quiet else print)
         poll_every, last_poll = float(cfg["inbox"]["poll_seconds"]), -1e9
+        failures = 0
         try:
             while True:
                 poll = not args.loop or time.monotonic() - last_poll >= poll_every
@@ -162,6 +164,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     print("  error in %s" % err)
                 if not args.loop:
                     return 1 if report["errors"] else 0
+                failures = failures + 1 if report["errors"] else 0
+                if failures:
+                    time.sleep(max(min(60, 2 ** min(failures - 1, 6)), report.get("retry_after") or 0))
         except KeyboardInterrupt:
             print("stopped")
             return 0

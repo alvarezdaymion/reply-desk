@@ -85,3 +85,26 @@ def test_follow_up_drafts_are_checked_too(tmp_path):
     assert good.followup(REPLY, [], 1, 3, "they wrote \"this weekend\"") == "Hi Pat, any thoughts?\n\n{signature}"
     bad, _ = drafter(tmp_path, {"draft": "Hi Pat, any thoughts? www.example.com\n\n{signature}"})
     assert bad.followup(REPLY, [], 1, 3, "two days") is None
+
+
+@pytest.mark.parametrize("token", ["{signature:invalid}", "{signature!r}", "{signature:{page_url}}"])
+def test_model_formatting_is_rejected_before_rendering(tmp_path, token):
+    d, _ = drafter(tmp_path, {**GOOD, "draft": "Overview: {page_url}\n" + token})
+    verdict = d.classify(REPLY, classify(REPLY["body"]))
+    assert verdict.draft is None
+    d, _ = drafter(tmp_path, {"draft": "Checking in.\n" + token})
+    assert d.followup(REPLY, [], 1, 3, "due") is None
+
+
+def test_model_tokens_must_use_the_exact_supported_spelling(tmp_path):
+    d, _ = drafter(tmp_path, {**GOOD, "draft": "Overview: {page_url:}\n{signature}"})
+    assert d.classify(REPLY, classify(REPLY["body"])).draft is None
+
+
+def test_model_client_has_no_automatic_request_retries(tmp_path, monkeypatch):
+    import sys
+
+    kwargs = []
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=lambda **options: kwargs.append(options)))
+    ModelDrafter(make_cfg(tmp_path))
+    assert kwargs == [{"max_retries": 0}]

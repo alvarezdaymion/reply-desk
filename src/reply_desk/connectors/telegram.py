@@ -15,6 +15,7 @@ import os
 from collections.abc import Sequence
 from typing import Any
 
+from ..cards import plain
 from ..http import Http, HttpError, Transport
 
 API = "https://api.telegram.org"
@@ -55,10 +56,19 @@ class TelegramClient:
         return data.get("result")
 
     def _message(self, text: str) -> dict[str, Any]:
-        return {"chat_id": self.chat_id, "text": text[:4096], "parse_mode": "HTML", "disable_web_page_preview": True}
+        if len(plain(text).encode("utf-16-le")) // 2 > 4096:
+            raise ValueError("Telegram message is too long")
+        return {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
 
     def send_card(self, text: str, buttons: Sequence[tuple[str, str]]) -> str:
-        return str(self._call("sendMessage", {**self._message(text), "reply_markup": keyboard(buttons)})["message_id"])
+        return self._send_message({**self._message(text), "reply_markup": keyboard(buttons)})
+
+    def _send_message(self, payload: dict[str, Any]) -> str:
+        result = self._call("sendMessage", payload)
+        mid = result.get("message_id") if isinstance(result, dict) else None
+        if type(mid) is not int or mid <= 0:
+            raise HttpError("Telegram sendMessage returned no valid message ID")
+        return str(mid)
 
     def update_card(self, message_id: str, text: str, buttons: Sequence[tuple[str, str]] = ()) -> None:
         """Rewrite a card. Without buttons the inline keyboard is removed."""
@@ -71,7 +81,7 @@ class TelegramClient:
         payload = self._message(text)
         if force_reply:
             payload["reply_markup"] = {"force_reply": True, "input_field_placeholder": "The new email text"}
-        return str(self._call("sendMessage", payload)["message_id"])
+        return self._send_message(payload)
 
     def answer(self, callback_id: str, text: str) -> None:
         self._call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:200]})

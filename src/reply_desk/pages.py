@@ -114,15 +114,20 @@ def publisher_for(cfg: Any) -> LocalPublisher | CommandPublisher:
     return LocalPublisher()
 
 
-def build(cfg: Any, reply: dict[str, Any], publisher: Any) -> tuple[Page, str]:
-    """Write and publish the page. Returns the page and what the publisher did."""
+def prepare(cfg: Any, reply: dict[str, Any]) -> Page:
+    """Write the local page so its URL and marker can be saved before publishing."""
     doc, marker = render(cfg, reply)
     slug = slug_for(reply.get("company") or domain_of(reply["lead_email"]), reply["lead_email"])
     path = cfg.site_dir / slug / "index.html"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(doc, encoding="utf-8")
-    note = publisher.publish(cfg.site_dir, slug)
-    return Page(slug, cfg["pages"]["base_url"].rstrip("/") + "/" + slug + "/", marker, path), note
+    return Page(slug, cfg["pages"]["base_url"].rstrip("/") + "/" + slug + "/", marker, path)
+
+
+def build(cfg: Any, reply: dict[str, Any], publisher: Any) -> tuple[Page, str]:
+    """Write and publish a test page for an explicit setup check."""
+    page = prepare(cfg, reply)
+    return page, publisher.publish(cfg.site_dir, page.slug)
 
 
 def urllib_fetch(url: str) -> tuple[int, str]:

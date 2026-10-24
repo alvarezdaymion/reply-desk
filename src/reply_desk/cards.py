@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 from typing import Any
@@ -12,8 +13,12 @@ TITLES = {"interested": "Interested", "question": "Question", "not_now": "Not no
 BUTTONS = (("Send", "send"), ("Edit", "edit"), ("Skip", "skip"))
 
 
-def buttons(card_id: str) -> list[tuple[str, str]]:
-    return [(label, "rd:%s:%s" % (action, card_id)) for label, action in BUTTONS]
+def revision(draft: str) -> str:
+    return hashlib.sha256(draft.encode()).hexdigest()[:16]
+
+
+def buttons(card_id: str, draft: str) -> list[tuple[str, str]]:
+    return [(label, "rd:%s:%s:%s" % (action, card_id, revision(draft))) for label, action in BUTTONS]
 
 
 def clip(text: str, limit: int) -> str:

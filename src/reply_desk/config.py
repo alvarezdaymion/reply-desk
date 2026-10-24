@@ -92,7 +92,7 @@ DEFAULTS: dict[str, Any] = {
     "followups": {
         "gaps_days": [2, 4, 7],
         "send_hour": 9,
-        "timezone": "",
+        "timezone": "UTC",
         "max_days_out": 90,
     },
     "answers": [],
@@ -140,18 +140,22 @@ class Config:
 
 
 def tzinfo_for(name: str) -> dt.tzinfo:
-    """"" is this machine's local time, "UTC" needs no tz database, anything else is an IANA name."""
+    """Use UTC or an explicit IANA name so future dates retain daylight-saving rules."""
     if not name:
-        tz = dt.datetime.now().astimezone().tzinfo
-        assert tz is not None
-        return tz
+        raise ValueError("a time zone is required")
     if name.upper() == "UTC":
         return dt.UTC
     return zoneinfo.ZoneInfo(name)
 
 
 def template_fields(template: str) -> set[str]:
-    return {f for _, f, _, _ in string.Formatter().parse(template) if f is not None}
+    fields = set()
+    for _, field, spec, conversion in string.Formatter().parse(template):
+        if field is not None:
+            if spec or conversion:
+                raise ValueError("template placeholders cannot use format specifications or conversions")
+            fields.add(field)
+    return fields
 
 
 def validate(data: dict[str, Any]) -> None:
@@ -190,6 +194,8 @@ def validate(data: dict[str, Any]) -> None:
     for i, a in enumerate(data["answers"]):
         if not (isinstance(a.get("keywords"), list) and a["keywords"] and isinstance(a.get("text"), str)):
             raise ValueError("answers[%d] needs keywords (a list) and text" % i)
+        if template_fields(a["text"]):
+            raise ValueError("answers[%d].text must not contain placeholders" % i)
     if data["model"]["enabled"] and data["model"]["effort"] not in ("low", "medium", "high", "xhigh", "max"):
         raise ValueError("model.effort must be low, medium, high, xhigh or max")
 

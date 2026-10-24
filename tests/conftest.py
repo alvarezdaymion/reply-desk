@@ -113,7 +113,10 @@ class FakeTelegram:
         self.queue.append(update)
 
     def tap(self, card_id, action="send", chat=None, user=1):
-        self.push({"callback_query": {"id": "cb%d" % self.next_update, "data": "rd:%s:%s" % (action, card_id),
+        prefix = "rd:%s:%s" % (action, card_id)
+        data = next((data for _, buttons in self.cards.values() for _, data in buttons
+                     if data.startswith(prefix + ":")), prefix)
+        self.push({"callback_query": {"id": "cb%d" % self.next_update, "data": data,
                                       "from": {"id": user}, "message": {"chat": {"id": chat or self.chat_id}}}})
 
     def reply_to(self, message_id, text):
