@@ -24,7 +24,7 @@ Run `uv run reply-desk init` to create `reply-desk.toml`, then ask:
 
 Done when `uv run reply-desk check` prints "Config OK" (it also lists which credentials are still missing).
 
-Use an empty state directory for a new installation. The application initializes an empty database and rejects unsupported state schemas; it does not migrate saved bodies or ledgers automatically.
+Use an empty state directory for a new installation. The application initializes an empty database as schema 3 and rejects every earlier schema, including versions 1 and 2, as well as newer schemas. Unsupported state is left unchanged; saved bodies and ledgers are not migrated automatically.
 
 ## 3. Connect Instantly
 
@@ -62,6 +62,8 @@ Start `uv run reply-desk run --loop` in a terminal and have the owner reply to o
 Then install the service from `examples/scheduling/` (systemd on Linux, launchd on macOS, or cron for one tick a minute), replacing `/path/to/reply-desk` and `/path/to/uv` (`which uv`). Done when `uv run reply-desk status` shows the replies and cards you expect.
 
 Incomplete reply bodies wait for retrieval before any draft is made. A failed or interrupted Telegram card post is locked and never reposted automatically, since Telegram may have accepted it. `status` lists these cards; check Telegram and answer the lead by hand. API rate limits stop the tick immediately and save a cooldown across restarts; later ticks make no API calls until the delay expires. Other loop errors use exponential backoff.
+
+Cooldowns honor valid `Retry-After` response headers from both the HTTP connectors and the model SDK, in seconds or as an HTTP date. If the body and header specify different delays, the longer valid delay applies.
 
 ## 7. Go live, only when the owner asks
 

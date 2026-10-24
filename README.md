@@ -42,6 +42,8 @@ The demo runs the real desk, ledger, classifier and page builder against a fake 
 
 A step that fails is reported and the rest of the tick still runs, except for rate limits. A rate limit stops the tick immediately and saves a cooldown; later ticks make no API calls until it expires, including after a restart. In loop mode, errors trigger exponential backoff from one to 60 seconds; a longer provider retry delay is honored. A throttled email call is locked before deferring, and accepted message IDs are retained for later readback. Uncertain external writes are never retried.
 
+Retry delays come from response bodies and `Retry-After` headers, including SDK errors. Headers may name a number of seconds or an HTTP date; the longest valid delay wins. A 429 with no valid positive delay uses a one-second minimum alongside loop backoff.
+
 When you tap Send, the desk checks that the draft has nothing left to fill in, that the address hasn't unsubscribed, that a linked page still answers 200 with its marker, and that the person hasn't written again since the card was made (if they have, the card is closed as stale). In dry-run mode, the default, the checks run and nothing is sent.
 
 Thread checks read every page and block sending if any page or required message metadata cannot be read. Drafts are limited to 2,500 characters, the size shown on a card. Each Send button identifies that draft; edits require a successful card update and a new tap on the updated button. Telegram messages are checked for length after decoding their markup and are never sliced.
@@ -159,7 +161,7 @@ examples/scheduling/   systemd, launchd and cron examples
 - Business days are Monday to Friday. Public holidays are not modelled.
 - A send blocks the tick for up to 20 seconds while it is read back.
 - One `run` process per state folder (a lock file enforces it on macOS and Linux).
-- Only the current state schema is supported. Empty databases are initialized; older, newer and unversioned populated databases are rejected without automatic migration.
+- Only state schema 3 is supported. Empty databases are initialized; every earlier version (including 1 and 2), newer versions and unversioned populated databases are rejected unchanged without automatic migration.
 
 ## Development
 
