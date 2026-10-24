@@ -187,3 +187,37 @@ def test_a_removed_plaintext_reference_cannot_confirm(tmp_path):
                                  body="Use in your reply.")
     store.move_send(send_id, "accepted", ("intent",), "accepted", provider_id=response["id"])
     assert sender.confirm(send_id).state == "locked"
+
+
+def test_rate_limited_send_is_locked_before_deferring_other_work(tmp_path, monkeypatch):
+    sender, store, inbox, clock, email = setup(tmp_path)
+    calls = []
+
+    def limited(**kwargs):
+        calls.append(True)
+        raise HttpError("Instantly send reply returned HTTP 429", 429, 15)
+
+    monkeypatch.setattr(inbox, "send_reply", limited)
+    with pytest.raises(HttpError) as error:
+        sender.send("reply:1", email)
+    assert error.value.retry_after == 15
+    assert store.send_by_key("reply:1")["state"] == "locked"
+    assert sender.send("reply:1", email).state == "locked" and len(calls) == 1
+
+
+def test_rate_limited_readback_keeps_the_saved_id_and_stops_reading(tmp_path, monkeypatch):
+    sender, store, inbox, clock, email = setup(tmp_path)
+    original = inbox.get_email
+    calls = []
+
+    def limited(mid):
+        calls.append(mid)
+        raise HttpError("Instantly get email returned HTTP 429", 429, 15)
+
+    monkeypatch.setattr(inbox, "get_email", limited)
+    with pytest.raises(HttpError):
+        sender.send("reply:1", email)
+    row = store.send_by_key("reply:1")
+    assert row["state"] == "accepted" and row["provider_id"] == calls[0] and len(calls) == 1
+    monkeypatch.setattr(inbox, "get_email", original)
+    assert sender.confirm(row["id"]).state == "confirmed" and len(inbox.sent) == 1

@@ -33,6 +33,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .http import raise_if_rate_limited
 from .store import Store
 
 # A message found in the thread must be newer than its intent, give or take this much clock skew.
@@ -152,8 +153,10 @@ class SafeSender:
             resp = self.provider.send_reply(reply_to_id=email["reply_to_id"], sender=email["sender"],
                                             subject=email["subject"], body=email["body"])
         except Exception as e:
-            return self._lock(send_id, ("intent",), True,
-                              "the send call failed and its outcome is unknown (%s); not retried" % short(e))
+            result = self._lock(send_id, ("intent",), True,
+                                "the send call failed and its outcome is unknown (%s); not retried" % short(e))
+            raise_if_rate_limited(e)
+            return result
         pid = str(resp.get("id") or "") if isinstance(resp, dict) else ""
         if not pid:
             return self._lock(send_id, ("intent",), True,
@@ -178,6 +181,7 @@ class SafeSender:
             try:
                 problem = mismatch(self.provider.get_email(pid), row, pid)
             except Exception as e:
+                raise_if_rate_limited(e)
                 problem = short(e)
             if not problem:
                 note = "readback %d at %s matched" % (n, secs(at))
@@ -217,6 +221,7 @@ class SafeSender:
             try:
                 problem = mismatch(self.provider.get_email(row["provider_id"]), row, row["provider_id"])
             except Exception as e:
+                raise_if_rate_limited(e)
                 problem = short(e)
             found = row["provider_id"] if not problem else None
         else:
@@ -235,6 +240,7 @@ class SafeSender:
             try:
                 thread = self.provider.thread(row["thread_id"], row["recipient"])
             except Exception as e:
+                raise_if_rate_limited(e)
                 why = "the thread could not be read (%s)" % short(e)
                 continue
             found = find_in_thread(thread, row, created - THREAD_SKEW)

@@ -135,21 +135,13 @@ class Store:
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
-            raise RuntimeError("%s was written by a newer reply-desk (schema %d)" % (self.path, version))
+        has_tables = self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1").fetchone()
+        if version not in (0, SCHEMA_VERSION) or (version == 0 and has_tables):
+            self.db.close()
+            raise RuntimeError("unsupported state schema %d; automatic migration is not supported" % version)
         if version == 0:
             self.db.executescript("BEGIN IMMEDIATE;\n%s\nPRAGMA user_version = %d;\nCOMMIT;"
                                   % (SCHEMA, SCHEMA_VERSION))
-        elif version == 1:
-            self.db.executescript("""BEGIN IMMEDIATE;
-                ALTER TABLE replies ADD COLUMN body_complete INTEGER NOT NULL DEFAULT 1;
-                ALTER TABLE cards ADD COLUMN post_state TEXT NOT NULL DEFAULT 'unposted'
-                    CHECK (post_state IN ('unposted', 'posting', 'posted', 'locked'));
-                ALTER TABLE cards ADD COLUMN reviewed_draft TEXT;
-                UPDATE cards SET post_state = CASE WHEN message_id IS NULL THEN 'locked' ELSE 'posted' END,
-                    reviewed_draft = CASE WHEN message_id IS NOT NULL THEN draft END;
-                PRAGMA user_version = 2;
-                COMMIT;""")
 
     def close(self) -> None:
         self.db.close()
@@ -175,12 +167,12 @@ class Store:
         return [dict(r) for r in self.db.execute(sql, args).fetchall()]
 
     def _move(self, c: sqlite3.Connection, table: str, key: Any, to: str, from_: tuple[str, ...],
-              **fields: Any) -> bool:
+              at: str | None = None, **fields: Any) -> bool:
         """The one way rows change state: only from an expected state, inside the caller's transaction."""
         sets = ", ".join(["state = ?", "updated_at = ?"] + ["%s = ?" % k for k in fields])
         marks = ", ".join("?" for _ in from_)
         cur = c.execute("UPDATE %s SET %s WHERE id = ? AND state IN (%s)" % (table, sets, marks),
-                        (to, self.now(), *fields.values(), key, *from_))
+                        (to, at or self.now(), *fields.values(), key, *from_))
         return cur.rowcount == 1
 
     # ---- audit and key/value -------------------------------------------------------------------
@@ -273,9 +265,10 @@ class Store:
     def card_for_prompt(self, prompt_id: str) -> dict[str, Any] | None:
         return self._one("SELECT * FROM cards WHERE edit_prompt_id = ?", (str(prompt_id),))
 
-    def move_card(self, card_id: str, to: str, from_: tuple[str, ...], note: str = "") -> bool:
+    def move_card(self, card_id: str, to: str, from_: tuple[str, ...], note: str = "", *,
+                  at: str | None = None) -> bool:
         with self.tx() as c:
-            moved = self._move(c, "cards", card_id, to, from_, note=note)
+            moved = self._move(c, "cards", card_id, to, from_, at=at, note=note)
             if moved:
                 self.log("card." + to, card_id, note, c)
             return moved

@@ -1,11 +1,14 @@
-"""Durable state upgrades preserve sends and hold uncertain card deliveries."""
+"""Unsupported state schemas are rejected without changing saved data."""
 
 import sqlite3
+
+import pytest
 
 from reply_desk.store import Store
 
 
-def test_version_one_upgrade_preserves_ledger_and_holds_unidentified_posts(tmp_path):
+@pytest.mark.parametrize("version", [0, 1, 3])
+def test_unsupported_schema_cannot_promote_an_unverified_body(tmp_path, version):
     path = tmp_path / "desk.db"
     with sqlite3.connect(path) as db:
         db.executescript("""
@@ -16,17 +19,12 @@ def test_version_one_upgrade_preserves_ledger_and_holds_unidentified_posts(tmp_p
             INSERT INTO cards VALUES ('c1', '101', 'First draft');
             INSERT INTO cards VALUES ('c2', NULL, 'Second draft');
             INSERT INTO sends VALUES (1, 'reply:1', 'locked');
-            PRAGMA user_version = 1;
         """)
-    store = Store(path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 2
-    assert store.reply(1)["body_complete"] == 1
-    assert store.card("c1")["post_state"] == "posted"
-    assert store.card("c1")["reviewed_draft"] == "First draft"
-    assert store.card("c2")["post_state"] == "locked"
-    assert store.card("c2")["reviewed_draft"] is None
-    assert store.send(1) == {"id": 1, "intent_key": "reply:1", "state": "locked"}
-    store.close()
-    store = Store(path)
-    assert store.card("c2")["post_state"] == "locked"
-    store.close()
+        db.execute("PRAGMA user_version = %d" % version)
+    with pytest.raises(RuntimeError, match="unsupported state schema"):
+        Store(path)
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == version
+        assert db.execute("SELECT * FROM replies").fetchall() == [(1, "Tell me more")]
+        assert db.execute("SELECT * FROM sends").fetchall() == [(1, "reply:1", "locked")]
+        assert "body_complete" not in {row[1] for row in db.execute("PRAGMA table_info(replies)")}

@@ -27,6 +27,21 @@ class HttpError(RuntimeError):
         self.retry_after = retry_after
 
 
+def retry_delay(error: Exception) -> float:
+    delay = getattr(error, "retry_after", None)
+    if isinstance(delay, (int, float)) and math.isfinite(delay) and delay > 0:
+        return float(delay)
+    return 1.0 if getattr(error, "status", getattr(error, "status_code", None)) == 429 else 0.0
+
+
+def raise_if_rate_limited(error: Exception) -> None:
+    delay = retry_delay(error)
+    if delay:
+        if isinstance(error, HttpError):
+            raise error
+        raise HttpError("model request rate limited", 429, delay) from None
+
+
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None,
                      timeout: float) -> tuple[int, bytes]:
     req = urllib.request.Request(url, data=body, method=method, headers=headers)

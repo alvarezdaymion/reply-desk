@@ -588,3 +588,96 @@ def test_followup_rendering_failure_keeps_the_saved_rule_draft(rig):
     card = rig.card(PAT)
     assert card["kind"] == "followup" and "Just checking this reached you" in card["draft"]
     assert "{signature" not in card["draft"]
+
+
+def test_rate_limited_card_post_stops_the_tick_and_persists_its_cooldown(rig, monkeypatch):
+    from reply_desk.http import HttpError
+
+    rig.inbox.add_inbound(PAT, "Tell me more")
+    rig.inbox.add_inbound("lead@example.org", "Tell me more", thread="th-2")
+    original = rig.tg.send_card
+    posts = []
+
+    def limited_once(text, controls):
+        posts.append(True)
+        if len(posts) == 1:
+            raise HttpError("Telegram sendMessage returned HTTP 429", 429, 30)
+        return original(text, controls)
+
+    monkeypatch.setattr(rig.tg, "send_card", limited_once)
+    report = rig.desk.tick()
+    assert len(posts) == 1 and report["errors"] and report["retry_after"] == 30
+    rig.store.close()
+    rig.restart()
+    rig.clock.t += dt.timedelta(seconds=29)
+    assert rig.desk.tick()["retry_after"] == 1 and len(posts) == 1
+    rig.clock.t += dt.timedelta(seconds=1)
+    rig.desk.tick()
+    assert len(posts) == 2
+    assert rig.card(PAT)["post_state"] == "locked"
+    assert rig.card("lead@example.org")["post_state"] == "posted"
+
+
+def test_rate_limited_hydration_defers_later_triage_and_taps(rig, monkeypatch):
+    from reply_desk.http import HttpError
+
+    first = rig.inbox.add_inbound(PAT, "Tell me more")
+    rig.inbox.emails[first["id"]]["body_fallback_reason"] = "large"
+    rig.inbox.add_inbound("lead@example.org", "Tell me more", thread="th-2")
+    calls = []
+
+    def limited(mid):
+        calls.append(mid)
+        raise HttpError("Instantly get email returned HTTP 429", 429, 20)
+
+    monkeypatch.setattr(rig.inbox, "get_email", limited)
+    monkeypatch.setattr(rig.tg, "updates", lambda *args: pytest.fail("taps ran during cooldown"))
+    report = rig.desk.tick()
+    assert calls == [first["id"]] and report["retry_after"] == 20
+    assert not rig.tg.cards and report["errors"]
+
+
+@pytest.mark.parametrize("outcome", ["confirmed", "resolved_sent"])
+def test_recovery_uses_ledger_settlement_time_before_moving_the_card(rig, monkeypatch, outcome):
+    card = interested(rig)
+    if outcome == "resolved_sent":
+        rig.inbox.script = ["never"]
+        tap(rig, card)
+        [send] = rig.store.sends("locked")
+        method, args = "settle_send", (send["id"],)
+    else:
+        method, args = "_settle", ()
+
+    def crash(*args, **kwargs):
+        raise Crash()
+
+    monkeypatch.setattr(rig.desk, method, crash)
+    with pytest.raises(Crash):
+        if outcome == "resolved_sent":
+            rig.desk.resolve(args[0], sent=True)
+        else:
+            tap(rig, card)
+    [send] = rig.store.sends(outcome)
+    settled_at = send["updated_at"]
+    rig.store.close()
+    rig.clock.t += dt.timedelta(days=5)
+    rig.restart().recover()
+    rig.desk.recover()
+    assert rig.store.card(card["id"])["updated_at"] == settled_at
+    assert rig.store.followups("scheduled")[0]["due_at"] == "2026-10-23T09:00:00+00:00"
+    assert len(rig.inbox.sent) == 1
+
+
+@pytest.mark.parametrize("terminal,followup_state", [("skipped", "done"), ("closed", "done"),
+                                                   ("dry_run", "done"), ("stale", "cancelled")])
+def test_recovery_reconciles_terminal_followup_cards(rig, terminal, followup_state):
+    tap(rig, interested(rig))
+    rig.clock.t += dt.timedelta(days=7)
+    rig.desk.followups()
+    card = rig.card(PAT)
+    assert rig.store.move_card(card["id"], terminal, ("pending",), "handled")
+    rig.store.close()
+    rig.restart().recover()
+    rig.desk.recover()
+    assert rig.store.followup(card["followup_id"])["state"] == followup_state
+    assert not rig.store.followups("scheduled", "carded") and len(rig.inbox.sent) == 1

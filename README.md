@@ -40,7 +40,7 @@ The demo runs the real desk, ledger, classifier and page builder against a fake 
 4. **Taps.** Send, Edit and Skip arrive by long polling, so there is no public webhook to expose. Edit asks you to reply to a message with the new text.
 5. **Follow-ups.** A follow-up that is due becomes a card, unless the person has written since.
 
-A step that fails is reported and the rest of the tick still runs. In loop mode, errors trigger exponential backoff from one to 60 seconds; a longer provider retry delay is honored.
+A step that fails is reported and the rest of the tick still runs, except for rate limits. A rate limit stops the tick immediately and saves a cooldown; later ticks make no API calls until it expires, including after a restart. In loop mode, errors trigger exponential backoff from one to 60 seconds; a longer provider retry delay is honored. A throttled email call is locked before deferring, and accepted message IDs are retained for later readback. Uncertain external writes are never retried.
 
 When you tap Send, the desk checks that the draft has nothing left to fill in, that the address hasn't unsubscribed, that a linked page still answers 200 with its marker, and that the person hasn't written again since the card was made (if they have, the card is closed as stale). In dry-run mode, the default, the checks run and nothing is sent.
 
@@ -69,7 +69,7 @@ Email APIs sometimes accept a send and then fail to confirm it: the request time
 
 No state leads back to a send. After a restart, an `accepted` send is read back by its ID. An `intent` with no ID means the process stopped during the send call: the desk looks for the exact message in the thread on the same 3, 10, 20 second schedule, confirms it if it is there and locks it if it is not. Taps are claimed with a conditional update, so a double tap, or a tap Telegram delivers again after a restart, finds the card already handled.
 
-To settle a locked send, stop the running service (or pause its scheduler) to release the state-directory lock. Check the sent folder in Instantly and run `reply-desk resolve <id> --sent` or `--not-sent`, or `reply-desk resolve --recheck` to read every locked send back once more, then restart the service. None of these commands sends anything; if the email did not go out and still needs an answer, reply by hand. Recovery reconciles a settled ledger row with its card and restores any missing follow-up using the card's original settlement time.
+To settle a locked send, stop the running service (or pause its scheduler) to release the state-directory lock. Check the sent folder in Instantly and run `reply-desk resolve <id> --sent` or `--not-sent`, or `reply-desk resolve --recheck` to read every locked send back once more, then restart the service. None of these commands sends anything; if the email did not go out and still needs an answer, reply by hand. Recovery reconciles a settled ledger row with its card and restores any missing follow-up using the ledger's original confirmation or human-resolution timestamp, even if the process stopped before settling the card. A recovered due date may already be past; it still becomes an approval card.
 
 `tests/test_sender.py` covers a send accepted but not yet visible, confirmed on the second readback, never confirmed, a timeout on the send call, a restart mid-send with and without the message in the thread, a restart after acceptance and the same-text refusal. `tests/test_desk.py` covers double taps, a tap redelivered after a restart and a crash mid-send, end to end.
 
@@ -89,6 +89,8 @@ After a confirmed send, the next follow-up is planned from the person's own word
 | "in two weeks", "in 10 days", "in a couple of months" | that day (a weekend moves to Monday) |
 
 When several phrases match, the latest wins. A date more than 90 days out is ignored as a misread. With no phrase, follow-ups use `gaps_days` (2, 4 and 7 days by default). Setting `gaps_days = []` also cancels existing scheduled follow-ups and closes their pending cards before taps are processed. A plain "no thanks" gets a polite close and no follow-ups. Each follow-up is a card like any other and is dropped if the person writes first. The time zone defaults to UTC; set an IANA name to preserve the chosen local hour across daylight-saving changes. Empty time zones are rejected. The parser is `src/reply_desk/timing.py`, tested against a fixed clock in `tests/test_timing.py`.
+
+Skipping a follow-up ends its sequence. Recovery completes interrupted transitions for skipped, stale, closed and dry-run cards without creating another follow-up or sending anything.
 
 ## Connectors
 
@@ -157,6 +159,7 @@ examples/scheduling/   systemd, launchd and cron examples
 - Business days are Monday to Friday. Public holidays are not modelled.
 - A send blocks the tick for up to 20 seconds while it is read back.
 - One `run` process per state folder (a lock file enforces it on macOS and Linux).
+- Only the current state schema is supported. Empty databases are initialized; older, newer and unversioned populated databases are rejected without automatic migration.
 
 ## Development
 

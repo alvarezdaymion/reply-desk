@@ -129,7 +129,12 @@ def test_loop_backs_off_on_errors_and_respects_retry_delay(tmp_path, monkeypatch
 
     monkeypatch.setattr(rig.tg, "updates", unavailable)
     monkeypatch.setattr(cli, "build_desk", lambda cfg, say=print: rig.desk)
-    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        rig.clock.sleep(seconds)
+
+    monkeypatch.setattr(cli.time, "sleep", sleep)
     assert cli.main(["run", "--loop", "--config", str(path)]) == 0
     assert sleeps == [1, 7, 4]
 

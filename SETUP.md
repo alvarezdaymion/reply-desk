@@ -24,6 +24,8 @@ Run `uv run reply-desk init` to create `reply-desk.toml`, then ask:
 
 Done when `uv run reply-desk check` prints "Config OK" (it also lists which credentials are still missing).
 
+Use an empty state directory for a new installation. The application initializes an empty database and rejects unsupported state schemas; it does not migrate saved bodies or ledgers automatically.
+
 ## 3. Connect Instantly
 
 The owner creates an API v2 key in Instantly's settings with the emails scopes for reading and sending (`emails:read`, `emails:create`), plus `leads:read` for names. Block list access is needed only if they turn on `[inbox] blocklist_unsubscribes`. Put it in `.env` as `INSTANTLY_API_KEY`.
@@ -59,7 +61,7 @@ Start `uv run reply-desk run --loop` in a terminal and have the owner reply to o
 
 Then install the service from `examples/scheduling/` (systemd on Linux, launchd on macOS, or cron for one tick a minute), replacing `/path/to/reply-desk` and `/path/to/uv` (`which uv`). Done when `uv run reply-desk status` shows the replies and cards you expect.
 
-Incomplete reply bodies wait for retrieval before any draft is made. A failed or interrupted Telegram card post is locked and never reposted automatically, since Telegram may have accepted it. `status` lists these cards; check Telegram and answer the lead by hand. In loop mode, API failures back off and honor provider retry delays.
+Incomplete reply bodies wait for retrieval before any draft is made. A failed or interrupted Telegram card post is locked and never reposted automatically, since Telegram may have accepted it. `status` lists these cards; check Telegram and answer the lead by hand. API rate limits stop the tick immediately and save a cooldown across restarts; later ticks make no API calls until the delay expires. Other loop errors use exponential backoff.
 
 ## 7. Go live, only when the owner asks
 
@@ -68,6 +70,7 @@ Set `[sending] mode = "live"` and restart the service. Explain before they tap S
 - each reply and each follow-up step is sent at most once; a second tap does nothing;
 - after a send, the card says "Sent once and confirmed" once a readback matches;
 - a send the desk can't confirm says LOCKED. Nothing is retried. Stop the service (or pause its scheduler) first, since `run --loop` holds the state-directory lock. Check the sent folder in Instantly and run `uv run reply-desk resolve <id> --sent` or `--not-sent`, or `uv run reply-desk resolve --recheck` to read every locked send back once more, then restart the service. If it did not go out and still needs an answer, reply by hand.
+- follow-up dates retain the ledger's original confirmation or resolution time across restarts. A date already past becomes a card for approval. Skipped follow-ups remain stopped even if the process was interrupted while recording the skip.
 
 Do not change `src/reply_desk/sender.py` or the checks in `desk.py` to get a send through. A locked send is the system working as designed.
 

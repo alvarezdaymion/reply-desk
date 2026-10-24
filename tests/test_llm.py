@@ -108,3 +108,16 @@ def test_model_client_has_no_automatic_request_retries(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=lambda **options: kwargs.append(options)))
     ModelDrafter(make_cfg(tmp_path))
     assert kwargs == [{"max_retries": 0}]
+
+
+@pytest.mark.parametrize("stage", ["classify", "followup"])
+def test_model_rate_limits_defer_work_without_repeating_the_request(tmp_path, stage):
+    from reply_desk.http import HttpError
+
+    d, messages = drafter(tmp_path, HttpError("model rate limited", 429, 12))
+    with pytest.raises(HttpError) as error:
+        if stage == "classify":
+            d.classify(REPLY, classify(REPLY["body"]))
+        else:
+            d.followup(REPLY, [], 1, 3, "due")
+    assert error.value.retry_after == 12 and len(messages.calls) == 1

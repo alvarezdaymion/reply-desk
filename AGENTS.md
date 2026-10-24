@@ -25,9 +25,11 @@ If you were asked to set Reply Desk up for someone, follow [SETUP.md](SETUP.md).
 - **Dry-run stays the default**, and in dry-run the provider is wrapped in `NoSend`.
 - **Checks before every send:** nothing left to fill in, not suppressed, linked page live (200 and its marker), no newer message from the person. Do not skip one to get a send through.
 - **Complete reads before approval.** Persist poll pagination, exhaust thread pagination, and hold incomplete reply bodies for retrieval before drafting. Missing or malformed thread metadata blocks sending.
+- **One supported state schema.** Initialize empty databases only. Reject unsupported schemas without migrating or marking saved bodies complete.
 - **Approve the displayed revision.** Send buttons identify the exact draft shown. An edit is sendable only after Telegram confirms its display. Drafts over 2,500 characters are refused.
 - **External work is claimed first.** Save card-post intent and page markers before calling Telegram or the publisher, and claim Edit callbacks before posting prompts. Uncertain card posts stay locked for a person; page recovery only checks the saved URL. Save rule decisions or drafts before optional model calls and disable SDK retries so a restart never repeats an uncertain paid call.
-- **Follow-up recovery is idempotent.** Reconcile terminal sends, cards and follow-ups on restart using the original settlement time. Empty `gaps_days` cancels scheduled follow-ups and closes pending follow-up cards before taps.
+- **Follow-up recovery is idempotent.** Reconcile terminal sends, cards and follow-ups on restart using the ledger's original confirmation or resolution timestamp, even when the card was not settled before a crash. Reconcile skipped, stale, closed and dry-run follow-up cards too. Empty `gaps_days` cancels scheduled follow-ups and closes pending follow-up cards before taps.
+- **Rate limits stop the tick.** Propagate retry delays through fallback handlers and persist the cooldown across restarts. Lock an uncertain email call before deferring; keep accepted message IDs for later readback. Never retry an uncertain external write.
 - **Use an explicit time zone.** Follow-ups default to UTC; other zones use IANA names. Empty time zones are rejected. Stop the service before `resolve`, then restart it.
 - **Unsubscribes are final.** Rules decide them before the model is asked; suppressed addresses are never sent to.
 - **The model drafts, never sends.** Every model answer goes through `llm.draft_problem` and falls back to the rules.

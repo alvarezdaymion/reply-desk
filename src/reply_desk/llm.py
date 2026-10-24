@@ -18,6 +18,7 @@ from typing import Any
 
 from .classify import LABELS, Verdict, authored_text
 from .config import template_fields
+from .http import raise_if_rate_limited
 
 ALLOWED_TOKENS = {"page_url", "booking_url", "signature"}
 
@@ -125,6 +126,7 @@ class ModelDrafter:
             data = self._ask(CLASSIFY % (RULES, name, facts), "<email>\n%s\n</email>" % json.dumps(email),
                              VERDICT_SCHEMA)
         except Exception as e:
+            raise_if_rate_limited(e)
             return Verdict(rules.label, rules.reason, "rules (model failed: %s)" % type(e).__name__)
         label, reason, draft = data.get("label"), data.get("reason"), data.get("draft")
         if label not in LABELS or not isinstance(reason, str) or not isinstance(draft, str):
@@ -145,7 +147,8 @@ class ModelDrafter:
         try:
             data = self._ask(FOLLOWUP % (step, total, why, RULES, name, facts),
                              "<email>\n%s\n</email>" % json.dumps({"thread": messages}), DRAFT_SCHEMA)
-        except Exception:
+        except Exception as e:
+            raise_if_rate_limited(e)
             return None
         draft = data.get("draft")
         if not isinstance(draft, str) or draft_problem(draft, "followup", False):
