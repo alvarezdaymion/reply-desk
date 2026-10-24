@@ -1,0 +1,4 @@
+# Without a service manager: one tick a minute (crontab -e, then add this line with your paths).
+# Taps then wait up to a minute. If a tick is still running, the next one exits (state/run.lock).
+# cron has a minimal PATH: give uv's full path. Credentials are read from .env in the repo folder.
+* * * * * cd /path/to/reply-desk && /path/to/uv run reply-desk run --quiet >> state/run.log 2>&1

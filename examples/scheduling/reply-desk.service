@@ -1,0 +1,16 @@
+# Linux systemd (user unit): keeps `reply-desk run --loop` running and restarts it if it stops.
+# Copy to ~/.config/systemd/user/, replace /path/to/reply-desk and /path/to/uv (`which uv`), then:
+#   systemctl --user daemon-reload && systemctl --user enable --now reply-desk.service
+# Credentials are read from /path/to/reply-desk/.env (never committed).
+[Unit]
+Description=Reply Desk
+After=network-online.target
+
+[Service]
+WorkingDirectory=/path/to/reply-desk
+ExecStart=/path/to/uv run reply-desk run --loop --quiet
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
