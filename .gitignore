@@ -1,0 +1,23 @@
+# runtime output and local config (never commit)
+state/
+site/
+reply-desk-demo/
+reply-desk.toml
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+*.env
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
