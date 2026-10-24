@@ -21,6 +21,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .messages import is_auto_reply
+
 SCHEMA_VERSION = 3
 
 SCHEMA = """
@@ -214,7 +216,7 @@ class Store:
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (r["provider_id"], r.get("thread_id", ""), r["lead_email"].lower(), r["inbox"], r.get("subject", ""),
                  r.get("body", ""), iso(received), int(not r.get("truncated")),
-                 int(bool(r.get("auto_reply"))), r.get("first_name", ""),
+                 int(is_auto_reply(r.get("auto_reply"))), r.get("first_name", ""),
                  r.get("company", ""), now, now))
             if cur.rowcount != 1:
                 return None

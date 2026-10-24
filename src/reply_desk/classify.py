@@ -9,6 +9,7 @@ written part of the email is read; quoted history below "On ... wrote:" is ignor
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 LABELS = ("interested", "question", "not_now", "unsubscribe")
@@ -56,6 +57,7 @@ _QUOTED = re.compile(r"^\s*On\b[^\n]{0,300}?\bwrote:|^\s*>|^-{2,}\s*Original Mes
 _URL = re.compile(r"https?://\S+", re.I)
 _QUESTION_START = re.compile(r"(?:^|[.!\n]\s*)(?:how|what|when|where|why|who|which|can|could|do|does|is|are|"
                              r"will|would)\b[^.!\n]*$", re.I | re.M)
+_QUOTES = str.maketrans(dict.fromkeys("‘’‚‛ʼ", "'") | dict.fromkeys("“”„‟", '"'))
 
 
 def authored_text(text: str) -> str:
@@ -66,7 +68,7 @@ def authored_text(text: str) -> str:
 
 
 def classify(text: str) -> Verdict:
-    body = authored_text(text)
+    body = authored_text(unicodedata.normalize("NFKC", text or "").translate(_QUOTES).casefold())
     for label, patterns in RULES:
         for rx in patterns:
             m = rx.search(body)

@@ -10,6 +10,7 @@ If you were asked to set Reply Desk up for someone, follow [SETUP.md](SETUP.md).
 - `src/reply_desk/store.py`: SQLite schema and state changes. Every card, send and follow-up state change is a conditional UPDATE.
 - `src/reply_desk/desk.py`: one tick (recover, poll, triage, taps, follow-ups) and the Send, Edit and Skip handlers.
 - `src/reply_desk/classify.py`, `drafts.py`, `timing.py`: rules, templates and follow-up dates. Pure functions.
+- `src/reply_desk/messages.py`: shared auto-reply flag parser for ingestion, storage and freshness checks.
 - `src/reply_desk/pages.py`: local page preparation, publishers and the live check.
 - `src/reply_desk/llm.py`: optional model labels and drafts, checked before use.
 - `src/reply_desk/connectors/`: Instantly and Telegram clients over `http.py`.
@@ -35,6 +36,8 @@ If you were asked to set Reply Desk up for someone, follow [SETUP.md](SETUP.md).
 - Page-check rate limits use the same cooldown and do not consume a page-failure attempt. The setup page check stops after a rate limit without another GET.
 - **Use an explicit time zone.** Follow-ups default to UTC; other zones use IANA names. Empty time zones are rejected. Stop the service before `resolve`, then restart it.
 - **Unsubscribes are final.** Rules decide them before the model is asked; suppressed addresses are never sent to.
+- **Normalize before classification.** Apply NFKC, fold typographic quotes and apostrophes to ASCII, and case-fold once before quoted-history detection and every classification rule. Keep stored reply bodies unchanged; matched reasons quote normalized text.
+- **Parse auto-reply flags once consistently.** Use `messages.is_auto_reply` for provider and stored flags. Only affirmative flags (`true`, `1`, `"true"`, `"1"`) skip replies; other values count as human messages for freshness checks.
 - **The model drafts, never sends.** Every model answer goes through `llm.draft_problem` and falls back to the rules.
 - **Secrets** come from environment variables. Errors name the call, never the URL or headers (`http.py`). Never commit `.env`, `reply-desk.toml`, `state/` or `site/`.
 - Runtime code is standard library only; the Anthropic SDK is an optional extra.

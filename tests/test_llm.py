@@ -74,10 +74,12 @@ def test_a_bad_draft_keeps_the_label_but_not_the_draft(tmp_path, draft, why):
     assert v.label == "interested" and v.draft is None and why in v.source
 
 
-def test_the_model_is_never_asked_about_an_unsubscribe(tmp_path):
+@pytest.mark.parametrize("text", ["Unsubscribe me", "Don’t email me about the cost.", "ＤＯ ＮＯＴ ＣＯＮＴＡＣＴ me"])
+def test_the_model_is_never_asked_about_an_unsubscribe(tmp_path, text):
     d, messages = drafter(tmp_path, GOOD)
-    rules = classify("Unsubscribe me")
-    assert d.classify(REPLY, rules) is rules and messages.calls == []
+    rules = classify(text)
+    assert rules.label == "unsubscribe"
+    assert d.classify({**REPLY, "body": text}, rules) is rules and messages.calls == []
 
 
 def test_follow_up_drafts_are_checked_too(tmp_path):

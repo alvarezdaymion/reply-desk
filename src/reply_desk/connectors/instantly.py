@@ -27,6 +27,7 @@ import urllib.parse
 from typing import Any
 
 from ..http import Http, HttpError, Transport
+from ..messages import is_auto_reply
 
 BASE = "https://api.instantly.ai/api/v2"
 PAGE = 100
@@ -49,7 +50,7 @@ def reply_from_item(item: dict[str, Any]) -> dict[str, Any]:
         "subject": str(item.get("subject") or ""),
         "body": text,
         "received_at": str(item.get("timestamp_created") or ""),
-        "auto_reply": item.get("is_auto_reply") in (1, True, "1", "true"),
+        "auto_reply": is_auto_reply(item.get("is_auto_reply")),
         "campaign_id": str(item.get("campaign_id") or ""),
         "truncated": bool(item.get("body_fallback_reason")) or not bool(body.get("text") or body.get("html")),
     }

@@ -67,6 +67,8 @@ Incomplete reply bodies wait for retrieval before any draft is made. A failed or
 
 Freshness checks cover every thread for the same recipient, as well as stored replies. Fractional reply timestamps are preserved in UTC, so replies within one second retain their order. A new reply cancels older follow-up schedules and closes their pending cards before body retrieval or model work, even if it arrived in another thread. Poll windows are saved before the first request so an interruption cannot move the initial lookback past an unread reply. Every fetched batch is saved before optional lead lookup. Failed or unfinished polls resume before approvals, even between scheduled polls and after a restart or cooldown.
 
+Classification first normalizes Unicode with NFKC, folds typographic quotes and apostrophes to ASCII, and case-folds the text before quoted-history detection and all label rules. An opt-out such as “don’t email” is suppressed before a model request. Stored reply bodies retain their original text; matched reasons show the normalized phrase. Auto-reply flags use the same parser everywhere: boolean `true`, numeric `1`, and strings `"true"` and `"1"` leave approvals and follow-ups active; other values count as human messages for freshness checks.
+
 Cooldowns honor valid `Retry-After` response headers from both the HTTP connectors and the model SDK, in seconds or as an HTTP date. If the body and header specify different delays, the longer valid delay applies.
 
 ## 7. Go live, only when the owner asks

@@ -26,6 +26,33 @@ def test_labels(text, label):
     assert classify(text).label == label
 
 
+@pytest.mark.parametrize("text,label,reason", [
+    ("Interested, but please don’t email about the cost.", "unsubscribe", "don't email"),
+    ("Please donʼt contact me.", "unsubscribe", "don't contact"),
+    ("Please don‘t contact me.", "unsubscribe", "don't contact"),
+    ("“ＤＯＮ＇Ｔ ＥＭＡＩＬ” me about the cost.", "unsubscribe", "don't email"),
+    ("ＵＮＳＵＢＳＣＲＩＢＥ, thanks.", "unsubscribe", "unsubscribe"),
+    ("I’M ALL SET. Tell me more?", "not_now", "i'm all set"),
+    ("ＷＥ＇ＲＥ　ＡＬＬ　ＳＥＴ", "not_now", "we're all set"),
+    ("LET’S TALK", "interested", "let's talk"),
+    ("I’ll review it.", "interested", "i'll review"),
+    ("ＳＯＵＮＤＳ　ＧＯＯＤ", "interested", "sounds good"),
+])
+def test_all_label_rules_use_normalized_unicode(text, label, reason):
+    result = classify(text)
+    assert result.label == label and result.reason == 'matched "%s"' % reason
+
+
+@pytest.mark.parametrize("text", ["ＨＯＷ ＭＵＣＨ", "A price list？"])
+def test_question_detection_uses_normalized_unicode(text):
+    assert classify(text).reason == "asks a question"
+
+
+def test_unicode_quoted_history_is_excluded_before_label_rules():
+    text = "Thanks.\n\nＯｎ Tuesday a sender ｗｒｏｔｅ：\nPlease unsubscribe me."
+    assert classify(text).reason == "no clear signal; needs a person to read it"
+
+
 def test_quoted_history_is_not_read():
     text = "Thanks.\n\nOn Tue, Oct 20, 2026 at 9:00 AM Sam <sam@example.org> wrote:\n> Interested? Tell me more!"
     assert authored_text(text) == "Thanks."
@@ -33,7 +60,7 @@ def test_quoted_history_is_not_read():
 
 
 def test_the_reason_says_what_matched():
-    assert classify("Sounds great!").reason == 'matched "Sounds great"'
+    assert classify("Sounds great!").reason == 'matched "sounds great"'
 
 
 def test_fill_leaves_out_lines_with_empty_placeholders():

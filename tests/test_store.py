@@ -84,3 +84,13 @@ def test_reply_freshness_and_cancellation_use_normalized_fractional_times(tmp_pa
     assert not store.due_followups(due - dt.timedelta(microseconds=1))
     assert [f["id"] for f in store.due_followups(due)] == [later_followup]
     store.close()
+
+
+@pytest.mark.parametrize("flag,expected", [(True, 1), (1, 1), ("1", 1), ("true", 1),
+                                          (False, 0), (0, 0), ("0", 0), ("false", 0), (None, 0), ("unknown", 0)])
+def test_stored_auto_reply_flags_use_the_provider_conventions(tmp_path, flag, expected):
+    store = Store(tmp_path / "desk.db")
+    rid = store.add_reply({"provider_id": "in-1", "lead_email": "lead@example.com", "inbox": "sender@example.org",
+                           "received_at": "2026-10-21T13:00:00Z", "auto_reply": flag})
+    assert store.reply(rid)["auto_reply"] == expected
+    store.close()

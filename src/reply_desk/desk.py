@@ -30,6 +30,7 @@ from .cards import buttons, card_text, revision
 from .classify import authored_text, classify
 from .connectors.instantly import reply_from_item
 from .http import raise_if_rate_limited, retry_delay
+from .messages import is_auto_reply
 from .sender import SafeSender, parse_ts, short
 from .store import Store, iso, zulu
 
@@ -66,7 +67,7 @@ def newer_inbound(thread: list[dict[str, Any]], reply: dict[str, Any]) -> dict[s
         created = parse_ts(m.get("timestamp_created"))
         if not created:
             raise ValueError("the thread has an invalid received timestamp")
-        if str(m["id"]) == reply["provider_id"] or m.get("is_auto_reply") in (1, True):
+        if str(m["id"]) == reply["provider_id"] or is_auto_reply(m.get("is_auto_reply")):
             continue
         if created >= received:
             return m
@@ -235,7 +236,8 @@ class Desk:
 
     def _triage(self, reply: dict[str, Any]) -> None:
         lead = reply["lead_email"]
-        if not reply["auto_reply"] and self.store.cancel_followups(lead, "they replied", before_reply_id=reply["id"]):
+        if not is_auto_reply(reply["auto_reply"]) and self.store.cancel_followups(
+                lead, "they replied", before_reply_id=reply["id"]):
             self.stats["followups_cancelled"] += 1
         if not reply["body_complete"]:
             try:
@@ -249,7 +251,7 @@ class Desk:
             self.store.update_reply(reply["id"], body=full["body"], body_complete=1)
             reply = self.store.reply(reply["id"]) or reply
         if reply["status"] == "new":
-            if self.store.is_suppressed(lead) or reply["auto_reply"]:
+            if self.store.is_suppressed(lead) or is_auto_reply(reply["auto_reply"]):
                 why = "this address unsubscribed" if self.store.is_suppressed(lead) else "auto-reply"
                 self.store.update_reply(reply["id"], status="ignored", note=why)
                 self.stats["ignored"] += 1

@@ -36,7 +36,7 @@ The demo runs the real desk, ledger, classifier and page builder against a fake 
 
 1. **Recover.** Anything a stopped process left in flight is settled first, without sending (see below).
 2. **Poll.** New replies are read from Instantly and stored once each, keyed by Instantly's message ID. Every fetched batch is saved before the optional name and company lookup, so a lookup failure cannot lose an observed reply or unsubscribe. Each poll reads up to three pages and saves its time window before the first request, then its continuation after processing each page. Failed or unfinished polls resume across ticks and restarts before approvals, even between scheduled polls. Auto-replies are recorded and get no card. Truncated or missing bodies wait for a complete read before drafting; retrieval is retried on later ticks.
-3. **Sort and draft.** Plain rules label each reply (or the optional model does, and its answer is checked). An interested reply gets its page built and published, and its card waits until the page is live. Unsubscribes are suppressed. Every other reply becomes a card with a draft.
+3. **Sort and draft.** Plain rules label each reply (or the optional model does, and its answer is checked). Before quoted-history detection and all classification rules, text is normalized once with Unicode NFKC, typographic quotes and apostrophes folded to ASCII, and case folding. Stored reply bodies keep their original text; matched reasons quote the normalized phrase. An interested reply gets its page built and published, and its card waits until the page is live. Unsubscribes are suppressed. Every other reply becomes a card with a draft.
 4. **Taps.** Send, Edit and Skip arrive by long polling, so there is no public webhook to expose. Edit asks you to reply to a message with the new text.
 5. **Follow-ups.** A follow-up that is due becomes a card, unless the person has written since.
 
@@ -47,6 +47,8 @@ Retry delays come from response bodies and `Retry-After` headers, including SDK 
 When you tap Send, the desk checks that the draft has nothing left to fill in, that the address hasn't unsubscribed, that a linked page still answers 200 with its marker, and that the person hasn't written again since the card was made (if they have, the card is closed as stale). In dry-run mode, the default, the checks run and nothing is sent.
 
 Freshness checks read every page across all of the recipient's threads and also check stored replies. Reply timestamps and poll cursors preserve fractional seconds in a fixed microsecond UTC format, so replies within the same second retain their order. A newer reply in any thread makes an older card stale, even if the provider read has not caught up. Missing pages or required message metadata block sending. Drafts are limited to 2,500 characters, the size shown on a card. Each Send button identifies that draft; edits require a successful card update and a new tap on the updated button. Telegram messages are checked for length after decoding their markup and are never sliced.
+
+Auto-reply flags use one parser during ingestion, storage and freshness checks. Boolean `true`, numeric `1`, and strings `"true"` and `"1"` identify auto-replies, which leave existing approvals and follow-ups active. Other values count as human messages for freshness checks.
 
 Page links must use the exact saved URL followed by whitespace, end of text, or plain sentence punctuation (`.,;:!?`) ending at whitespace or end of text. Other suffixes, including apostrophes, paths, queries and fragments, are rejected before a live check or send. Links on the page host obey the same rule; the configured booking link is exempt. The saved page URL must return 200 with its marker. Model page and booking tokens stand alone with whitespace around them; invalid model drafts fall back to the rules. A rate-limited page check stops the tick and preserves the remaining page-check attempts.
 
@@ -145,6 +147,7 @@ src/reply_desk/
   sender.py       the send ledger: intent, readback, lock (the only send path)
   store.py        SQLite state; cards, sends and follow-ups change only from an expected state
   classify.py     the rules that sort replies
+  messages.py     shared auto-reply flag parsing
   drafts.py       draft templates and the checks before a send
   timing.py       follow-up dates from what people wrote
   pages.py        one-page site: render, publish, live check

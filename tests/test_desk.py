@@ -938,3 +938,57 @@ def test_a_poll_backlog_finishes_before_queued_approvals(rig, monkeypatch):
     rig.desk.tick(poll=False)
     assert reads == ["", "1", "2", "3"]
     assert rig.store.is_suppressed(PAT) and not rig.inbox.sent
+
+
+@pytest.mark.parametrize("text", ["Don’t email me about the cost.", "ＰＬＥＡＳＥ ＤＯＮ＇Ｔ ＣＯＮＴＡＣＴ ＭＥ"])
+def test_unicode_opt_out_closes_an_existing_approval_without_sending(rig, text):
+    card = interested(rig)
+    opt_out = rig.inbox.add_inbound(PAT, text, thread="th-new", minutes_ago=1)
+    rig.tg.tap(card["id"])
+    rig.desk.tick()
+    assert rig.store.is_suppressed(PAT) and rig.store.card(card["id"])["state"] == "closed"
+    [reply] = rig.store.replies("suppressed")
+    assert reply["provider_id"] == opt_out["id"] and reply["body"] == text
+    assert not rig.inbox.sent and not rig.store.cards("pending")
+
+
+@pytest.mark.parametrize("flag", [True, 1, "1", "true"])
+@pytest.mark.parametrize("polled", [False, True])
+def test_auto_reply_flags_preserve_a_pending_approval(rig, flag, polled):
+    card = interested(rig)
+    auto = rig.inbox.add_inbound(PAT, "Automatic absence notice", thread="th-auto", minutes_ago=1)
+    auto["is_auto_reply"] = flag
+    if polled:
+        rig.desk.tick()
+        [ignored] = rig.store.replies("ignored")
+        assert ignored["auto_reply"] == 1
+        assert not rig.store.has_newer_reply(card["reply_id"])
+    assert tap(rig, card)["state"] == "sent"
+    assert len(rig.inbox.sent) == 1
+
+
+@pytest.mark.parametrize("flag", ["1", "true"])
+@pytest.mark.parametrize("carded", [False, True])
+def test_string_auto_reply_flags_preserve_followup_schedules_and_cards(rig, flag, carded):
+    tap(rig, interested(rig))
+    [followup] = rig.store.followups("scheduled")
+    rig.clock.t = dt.datetime.fromisoformat(followup["due_at"])
+    if carded:
+        rig.desk.tick(poll=False)
+    auto = rig.inbox.add_inbound(PAT, "Automatic absence notice", thread="th-auto", minutes_ago=1)
+    auto["is_auto_reply"] = flag
+    rig.desk.tick()
+    assert rig.store.followup(followup["id"])["state"] == "carded"
+    card = rig.card(PAT)
+    assert card["kind"] == "followup" and card["state"] == "pending"
+    assert tap(rig, card)["state"] == "sent" and len(rig.inbox.sent) == 2
+
+
+@pytest.mark.parametrize("flag", [False, 0, "0", "false", None, "unknown"])
+def test_other_auto_reply_flags_keep_newer_messages_in_freshness_checks(rig, flag):
+    card = interested(rig)
+    message = rig.inbox.add_inbound(PAT, "Another question", thread="th-new", minutes_ago=1)
+    message["is_auto_reply"] = flag
+    rig.desk.poll()
+    assert rig.store.has_newer_reply(card["reply_id"])
+    assert tap(rig, card)["state"] == "stale" and not rig.inbox.sent
