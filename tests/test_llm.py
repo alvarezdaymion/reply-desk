@@ -1,0 +1,87 @@
+"""The optional model drafter against a fake client: checked answers, rules on anything odd."""
+
+import json
+from types import SimpleNamespace
+
+import pytest
+from conftest import make_cfg
+
+from reply_desk.classify import Verdict, classify
+from reply_desk.llm import ModelDrafter
+
+REPLY = {"first_name": "Pat", "company": "Acme", "subject": "Re: Hi", "body": "Tell me more",
+         "lead_email": "pat@example.com"}
+GOOD = {"label": "interested", "reason": "asks for more",
+        "draft": "Hi Pat,\n\nHere is the overview: {page_url}\n\n{signature}"}
+
+
+class FakeMessages:
+    def __init__(self, answer, stop="end_turn"):
+        self.answer, self.stop, self.calls = answer, stop, []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        text = self.answer if isinstance(self.answer, str) else json.dumps(self.answer)
+        return SimpleNamespace(stop_reason=self.stop, content=[SimpleNamespace(type="text", text=text)])
+
+
+def drafter(tmp_path, answer, stop="end_turn", fallbacks=False):
+    messages = FakeMessages(answer, stop)
+    client = SimpleNamespace(messages=messages, beta=SimpleNamespace(messages=messages))
+    return ModelDrafter(make_cfg(tmp_path, model={"enabled": True, "fallbacks": fallbacks}), client), messages
+
+
+def test_a_good_answer_is_used(tmp_path):
+    d, messages = drafter(tmp_path, GOOD)
+    v = d.classify(REPLY, classify(REPLY["body"]))
+    assert v == Verdict("interested", "asks for more", "model", GOOD["draft"])
+    call = messages.calls[0]
+    assert call["model"] == "claude-opus-5-5" and call["output_config"]["format"]["type"] == "json_schema"
+    assert "<email>" in call["messages"][0]["content"] and "Tell me more" in call["messages"][0]["content"]
+
+
+def test_fallbacks_use_the_beta_header(tmp_path):
+    d, messages = drafter(tmp_path, GOOD, fallbacks=True)
+    d.classify(REPLY, classify(REPLY["body"]))
+    assert messages.calls[0]["betas"] == ["server-side-fallback-2026-07-01"]
+    assert messages.calls[0]["fallbacks"] == "default"
+
+
+@pytest.mark.parametrize("answer,stop", [
+    ({"label": "maybe", "reason": "x", "draft": ""}, "end_turn"),
+    ("not json", "end_turn"),
+    (GOOD, "refusal"),
+    (RuntimeError("overloaded"), "end_turn"),
+])
+def test_anything_odd_falls_back_to_the_rules(tmp_path, answer, stop):
+    d, _ = drafter(tmp_path, answer, stop)
+    rules = classify(REPLY["body"])
+    v = d.classify(REPLY, rules)
+    assert (v.label, v.draft) == (rules.label, None) and v.source.startswith("rules")
+
+
+@pytest.mark.parametrize("draft,why", [
+    ("Hi, see https://example.com/x\n\n{signature}", "link"),
+    ("Hi {first_name}\n\n{signature}", "unknown placeholders"),
+    ("Hi Pat, here: {page_url}", "no {signature}"),
+    ("Hi Pat, thanks!\n\n{signature}", "no {page_url}"),
+])
+def test_a_bad_draft_keeps_the_label_but_not_the_draft(tmp_path, draft, why):
+    d, _ = drafter(tmp_path, {**GOOD, "draft": draft})
+    v = d.classify(REPLY, classify(REPLY["body"]))
+    assert v.label == "interested" and v.draft is None and why in v.source
+
+
+def test_the_model_is_never_asked_about_an_unsubscribe(tmp_path):
+    d, messages = drafter(tmp_path, GOOD)
+    rules = classify("Unsubscribe me")
+    assert d.classify(REPLY, rules) is rules and messages.calls == []
+
+
+def test_follow_up_drafts_are_checked_too(tmp_path):
+    good, _ = drafter(tmp_path, {"draft": "Hi Pat, any thoughts?\n\n{signature}"})
+    assert good.followup(REPLY, [], 1, 3, "they wrote \"this weekend\"") == "Hi Pat, any thoughts?\n\n{signature}"
+    bad, _ = drafter(tmp_path, {"draft": "Hi Pat, any thoughts? www.example.com\n\n{signature}"})
+    assert bad.followup(REPLY, [], 1, 3, "two days") is None
