@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd: keeps `reply-desk run --loop` running and restarts it if it stops.
+  1. Run `uv run reply-desk run` once in the repo folder, so state/ exists for the log.
+  2. Replace /path/to/reply-desk and /path/to/uv (run `which uv`).
+  3. cp examples/scheduling/com.example.reply-desk.plist ~/Library/LaunchAgents/
+  4. launchctl load ~/Library/LaunchAgents/com.example.reply-desk.plist
+  Credentials are read from /path/to/reply-desk/.env (never committed).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.reply-desk</string>
+  <key>WorkingDirectory</key><string>/path/to/reply-desk</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/uv</string>
+    <string>run</string>
+    <string>reply-desk</string>
+    <string>run</string>
+    <string>--loop</string>
+    <string>--quiet</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/path/to/reply-desk/state/run.log</string>
+  <key>StandardErrorPath</key><string>/path/to/reply-desk/state/run.log</string>
+</dict>
+</plist>
