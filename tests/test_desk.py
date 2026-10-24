@@ -223,11 +223,13 @@ def test_a_plain_no_gets_a_polite_close_and_no_follow_ups(rig):
 
 def test_the_same_text_twice_to_one_address_goes_back_for_an_edit(rig):
     rig.inbox.add_inbound("morgan@example.org", "No thanks.", thread="th-1", minutes_ago=50)
+    rig.desk.tick()
+    first = rig.card("morgan@example.org")
+    assert tap(rig, first)["state"] == "sent"
     rig.inbox.add_inbound("morgan@example.org", "No thanks, really.", thread="th-2", minutes_ago=40)
     rig.desk.tick()
-    first, second = [c for c in rig.store.cards("pending")]
+    second = rig.card("morgan@example.org")
     assert first["draft"] == second["draft"]
-    assert tap(rig, first)["state"] == "sent"
     assert tap(rig, second)["state"] == "pending" and len(rig.inbox.sent) == 1
     assert "edit the text" in rig.tg.cards[second["message_id"]][0]
 
@@ -681,3 +683,130 @@ def test_recovery_reconciles_terminal_followup_cards(rig, terminal, followup_sta
     rig.desk.recover()
     assert rig.store.followup(card["followup_id"])["state"] == followup_state
     assert not rig.store.followups("scheduled", "carded") and len(rig.inbox.sent) == 1
+
+
+@pytest.mark.parametrize("carded", [False, True])
+def test_cross_thread_reply_cancels_followups_before_an_interrupted_model_call(rig, carded):
+    tap(rig, interested(rig))
+    [followup] = rig.store.followups("scheduled")
+    old_card = None
+    if carded:
+        rig.clock.t += dt.timedelta(days=3)
+        rig.desk.followups()
+        old_card = rig.card(PAT)
+    fresh = rig.inbox.add_inbound(PAT, "What does it cost?", thread="th-new")
+    fresh["timestamp_created"] = rig.clock.now().isoformat()
+
+    class InterruptedDrafter:
+        def classify(self, reply, verdict):
+            raise Crash()
+
+    rig.desk.drafter = InterruptedDrafter()
+    with pytest.raises(Crash):
+        rig.desk.tick()
+    assert rig.store.followup(followup["id"])["state"] == "cancelled"
+    if old_card:
+        assert rig.store.card(old_card["id"])["state"] == "stale"
+    rig.store.close()
+    rig.clock.t += dt.timedelta(days=3)
+    rig.restart().tick(poll=False)
+    if old_card:
+        tap(rig, old_card)
+    assert len(rig.inbox.sent) == 1
+
+
+def test_unpolled_reply_in_another_thread_blocks_a_followup(rig):
+    tap(rig, interested(rig))
+    rig.clock.t += dt.timedelta(days=3)
+    rig.desk.followups()
+    followup = rig.card(PAT)
+    fresh = rig.inbox.add_inbound(PAT, "One more question", thread="th-new")
+    fresh["timestamp_created"] = rig.clock.now().isoformat()
+    assert not rig.store.has_reply(fresh["id"])
+    assert tap(rig, followup)["state"] == "stale" and len(rig.inbox.sent) == 1
+
+
+def test_a_stored_newer_reply_blocks_send_even_if_the_provider_read_is_stale(rig, monkeypatch):
+    card = interested(rig)
+    old_thread = rig.inbox.thread("th-1", PAT)
+    fresh = rig.inbox.add_inbound(PAT, "Another question", thread="th-new", minutes_ago=1)
+    rig.desk.poll()
+    assert rig.store.has_reply(fresh["id"])
+    monkeypatch.setattr(rig.inbox, "thread", lambda *args: old_thread)
+    assert tap(rig, card)["state"] == "stale" and not rig.inbox.sent
+
+
+def test_a_delayed_older_reply_does_not_cancel_a_newer_followup(rig):
+    tap(rig, interested(rig))
+    [followup] = rig.store.followups("scheduled")
+    rig.inbox.add_inbound(PAT, "Earlier question", thread="th-old", minutes_ago=63)
+    rig.desk.tick()
+    assert rig.store.followup(followup["id"])["state"] == "scheduled"
+
+
+def test_edited_page_links_check_the_complete_destination(rig):
+    card = interested(rig)
+    reply = rig.store.reply(card["reply_id"])
+    extended = reply["page_url"] + "details"
+    rig.store.edit_draft(card["id"], "The details are here: " + extended)
+    rig.desk._refresh(card["id"], "Edited")
+    assert tap(rig, card)["state"] == "pending" and not rig.inbox.sent
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_the_first_poll_window_is_saved_before_processing_replies(rig, monkeypatch, paged):
+    first = rig.inbox.add_inbound("first@example.com", "Question?", minutes_ago=23 * 60)
+    second = rig.inbox.add_inbound("second@example.com", "Question?", minutes_ago=23 * 60)
+    if paged:
+        monkeypatch.setattr(rig.inbox, "list_reply_page", lambda since, after: (rig.inbox.list_replies(since), ""),
+                            raising=False)
+    original = rig.inbox.lead
+
+    def interrupted(email):
+        if email == "second@example.com":
+            raise Crash()
+        return original(email)
+
+    monkeypatch.setattr(rig.inbox, "lead", interrupted)
+    with pytest.raises(Crash):
+        rig.desk.poll()
+    assert rig.store.has_reply(first["id"]) and not rig.store.has_reply(second["id"])
+    monkeypatch.setattr(rig.inbox, "lead", original)
+    rig.store.close()
+    rig.clock.t += dt.timedelta(hours=2)
+    rig.restart().poll()
+    assert rig.store.has_reply(second["id"])
+
+
+@pytest.mark.parametrize("raised", [False, True])
+def test_a_page_rate_limit_defers_the_tick_without_using_a_page_attempt(rig, monkeypatch, raised):
+    from reply_desk.http import HttpError
+
+    rig.inbox.add_inbound(PAT, "Tell me more")
+    rig.inbox.add_inbound("second@example.com", "What does it cost?", thread="th-2", minutes_ago=30)
+    checks = []
+
+    def limited(url):
+        checks.append(url)
+        if raised:
+            raise HttpError("page GET returned HTTP 429", 429, 30)
+        return 429, ""
+
+    monkeypatch.setattr(rig.desk, "fetch", limited)
+    report = rig.desk.tick()
+    assert len(checks) == 1 and report["errors"] and report["retry_after"] > 0
+    [reply] = rig.store.replies("waiting_page")
+    assert reply["attempts"] == 0 and not rig.tg.cards
+    assert rig.store.get("api.retry_until")
+    monkeypatch.setattr(rig.desk, "fetch", rig.fetch)
+    rig.clock.sleep(report["retry_after"])
+    rig.desk.tick(poll=False)
+    assert rig.card(PAT) and rig.card("second@example.com")
+    assert rig.store.reply(reply["id"])["attempts"] == 0
+
+
+def test_a_booking_link_on_the_page_host_does_not_need_the_page_marker(make_rig):
+    rig = make_rig(pages={"base_url": "https://example.com"})
+    card = interested(rig)
+    assert rig.cfg["business"]["booking_url"] in card["draft"]
+    assert tap(rig, card)["state"] == "sent"

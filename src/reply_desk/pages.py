@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .drafts import domain_of
-from .http import USER_AGENT
+from .http import USER_AGENT, HttpError, header_delay, raise_if_rate_limited
 
 TEMPLATE = Path(__file__).parent / "templates" / "page.html"
 MARKER_SLOT = "__REPLY_DESK_MARKER__"
@@ -134,8 +134,15 @@ def urllib_fetch(url: str) -> tuple[int, str]:
     req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
+            delay = header_delay(getattr(resp, "headers", None))
+            if resp.status == 429 or delay:
+                raise HttpError("page GET returned HTTP %d" % resp.status, resp.status,
+                                delay or None)
             return resp.status, resp.read(512 * 1024).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
+        delay = header_delay(e.headers)
+        if e.code == 429 or delay:
+            raise HttpError("page GET returned HTTP %d" % e.code, e.code, delay or None) from None
         return e.code, ""
 
 
@@ -147,7 +154,10 @@ def check_live(url: str, marker: str, fetch: Fetch = urllib_fetch) -> tuple[bool
     try:
         status, body = fetch(probe)
     except Exception as e:
+        raise_if_rate_limited(e)
         return False, "the GET failed: %s" % type(e).__name__
+    if status == 429:
+        raise HttpError("page GET returned HTTP 429", 429)
     if status != 200:
         return False, "the GET returned HTTP %d" % status
     if marker not in body:

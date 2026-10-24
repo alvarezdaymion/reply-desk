@@ -6,8 +6,8 @@ Env:
 
 Calls (base https://api.instantly.ai/api/v2):
   GET  /emails?email_type=received&min_timestamp_created=..  new replies, oldest first, paged
-  GET  /emails?search=thread:<id>&lead=<email>               one thread: the stale check before a
-                                                             send, follow-ups, restart recovery
+  GET  /emails?search=thread:<id>&lead=<email>               one thread: restart recovery
+  GET  /emails?lead=<email>                                all threads: pre-send and follow-up freshness
   GET  /emails/<id>                                          read one message back by its ID
   POST /leads/list {"contacts": [email]}                     a lead's first name and company (a query)
   POST /emails/reply                                         the only send; only SafeSender calls it
@@ -95,6 +95,7 @@ class InstantlyClient:
             cursor = nxt
 
     def thread(self, thread_id: str, lead_email: str) -> list[dict[str, Any]]:
+        """All messages for a lead; a nonempty thread_id narrows the read for send recovery."""
         params: dict[str, Any] = {"lead": lead_email, "sort_order": "asc", "limit": PAGE, "preview_only": "false"}
         if thread_id:
             params["search"] = "thread:" + thread_id

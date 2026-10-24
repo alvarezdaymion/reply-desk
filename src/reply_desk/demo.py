@@ -106,7 +106,9 @@ class DemoInbox:
 
     def thread(self, thread_id: str, lead_email: str) -> list[dict[str, Any]]:
         return [self._public(e) for e in self.emails.values()
-                if e["thread_id"] == thread_id and not e.get("_hidden")]
+                if (not thread_id or e["thread_id"] == thread_id)
+                and (e["from_address_email"] == lead_email or e.get("to_address_email_list") == lead_email)
+                and not e.get("_hidden")]
 
     def get_email(self, email_id: str) -> dict[str, Any]:
         email = self.emails.get(email_id)

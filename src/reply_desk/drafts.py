@@ -11,6 +11,7 @@ until someone taps Edit.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from typing import Any
 
 from .config import template_fields
@@ -56,6 +57,17 @@ def check(text: str | None) -> str | None:
 
 def domain_of(email: str) -> str:
     return email.rsplit("@", 1)[-1] if "@" in email else email
+
+
+def page_links(text: str, page_url: str, booking_url: str = "") -> list[str]:
+    """Complete URLs that reference the prepared page or its host, in order of appearance."""
+    if not page_url:
+        return []
+    host = urllib.parse.urlsplit(page_url).hostname
+    urls = re.findall(r"https?://[^\s<>\"']+", text, re.I)
+    links = (url for url in urls if url != booking_url
+             and (page_url in url or urllib.parse.urlsplit(url).hostname == host))
+    return list(dict.fromkeys(links))
 
 
 def values_for(cfg: Any, reply: dict[str, Any]) -> dict[str, str]:

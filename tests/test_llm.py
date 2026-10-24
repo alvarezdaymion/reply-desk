@@ -121,3 +121,10 @@ def test_model_rate_limits_defer_work_without_repeating_the_request(tmp_path, st
         else:
             d.followup(REPLY, [], 1, 3, "due")
     assert error.value.retry_after == 12 and len(messages.calls) == 1
+
+
+@pytest.mark.parametrize("link", ["{page_url}details", "{page_url}?extra=1", "{page_url}#extra",
+                                  "prefix{page_url}", "{page_url}.example.com", "{booking_url}/extra"])
+def test_model_link_tokens_cannot_be_extended(tmp_path, link):
+    d, _ = drafter(tmp_path, {**GOOD, "draft": "Overview: {page_url}\nDetails: " + link + "\n{signature}"})
+    assert d.classify(REPLY, classify(REPLY["body"])).draft is None

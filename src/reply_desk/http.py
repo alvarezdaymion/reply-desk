@@ -43,7 +43,7 @@ def _positive_seconds(value: Any) -> float:
     return delay if math.isfinite(delay) and delay > 0 else 0.0
 
 
-def _header_delay(headers: Any, now: dt.datetime | None = None) -> float:
+def header_delay(headers: Any, now: dt.datetime | None = None) -> float:
     if not hasattr(headers, "items"):
         return 0.0
     delays = [0.0]
@@ -65,7 +65,7 @@ def _header_delay(headers: Any, now: dt.datetime | None = None) -> float:
 def retry_delay(error: Exception, *, now: dt.datetime | None = None) -> float:
     response = getattr(error, "response", None)
     delay = max(_positive_seconds(getattr(error, "retry_after", None)),
-                _header_delay(getattr(response, "headers", None), now))
+                header_delay(getattr(response, "headers", None), now))
     if delay:
         return delay
     return 1.0 if getattr(error, "status", getattr(error, "status_code", None)) == 429 else 0.0
@@ -121,7 +121,7 @@ class Http:
         if status >= 400:
             parameters = data.get("parameters") if isinstance(data, dict) else None
             body_delay = _positive_seconds(parameters.get("retry_after")) if isinstance(parameters, dict) else 0.0
-            delay = max(body_delay, _header_delay(response_headers)) or None
+            delay = max(body_delay, header_delay(response_headers)) or None
             raise HttpError("%s returned HTTP %d" % (label, status), status, delay)
         if data is None:
             raise HttpError("%s returned a body that is not JSON" % label, status)

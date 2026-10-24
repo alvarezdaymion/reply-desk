@@ -158,3 +158,15 @@ def test_status_lists_uncertain_card_posts(tmp_path, monkeypatch, capsys):
     rig.desk.tick()
     output = "\n".join(status_lines(rig.store, rig.cfg.tz()))
     assert "Locked card posts" in output and rig.card("lead@example.com")["id"] in output
+
+
+def test_check_page_stops_after_a_rate_limit(tmp_path, capsys):
+    calls, sleeps = [], []
+
+    def limited(url):
+        calls.append(url)
+        return 429, ""
+
+    assert cli.check_page(make_cfg(tmp_path), fetch=limited, sleep=sleeps.append) is False
+    assert len(calls) == 1 and not sleeps
+    assert "429" in capsys.readouterr().out

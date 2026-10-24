@@ -79,3 +79,19 @@ def test_command_publisher_failures_raise():
 
     with pytest.raises(PublishError, match="TimeoutExpired"):
         CommandPublisher(["x"], run=slow).publish(None, "s")
+
+
+def test_page_http_errors_preserve_retry_after_and_do_not_expose_response_text(monkeypatch):
+    import io
+    import urllib.error
+
+    from reply_desk.http import HttpError
+
+    def limited(*args, **kwargs):
+        raise urllib.error.HTTPError("https://pages.example.com/private", 429, "private response",
+                                     {"Retry-After": "120"}, io.BytesIO(b"private response"))
+
+    monkeypatch.setattr("urllib.request.urlopen", limited)
+    with pytest.raises(HttpError) as error:
+        pages.check_live("https://pages.example.com/test/", "rd-test", pages.urllib_fetch)
+    assert error.value.retry_after == 120 and "private" not in str(error.value)

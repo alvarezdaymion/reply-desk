@@ -162,13 +162,16 @@ class Desk:
         lookback = dt.timedelta(hours=float(self.cfg["inbox"]["lookback_hours"]))
         since = (cursor - POLL_OVERLAP) if cursor else self.clock() - lookback
         campaigns = {str(c) for c in self.cfg["inbox"]["campaign_ids"]}
-        if not hasattr(self.inbox, "list_reply_page"):
-            newest = self._store_replies(self.inbox.list_replies(zulu(since)), campaigns, cursor)
-            if newest:
-                self.store.put("inbox.cursor", iso(newest))
-            return
         progress = json.loads(self.store.get("inbox.pagination") or "null") or {
             "since": zulu(since), "after": "", "newest": iso(cursor) if cursor else ""}
+        self.store.put("inbox.pagination", json.dumps(progress))
+        if not hasattr(self.inbox, "list_reply_page"):
+            newest = self._store_replies(self.inbox.list_replies(progress["since"]), campaigns,
+                                         parse_ts(progress["newest"]))
+            if newest:
+                self.store.put("inbox.cursor", iso(newest))
+            self.store.put("inbox.pagination", "null")
+            return
         seen = {progress["after"]}
         for _ in range(3):
             items, nxt = self.inbox.list_reply_page(progress["since"], progress["after"])
@@ -224,6 +227,8 @@ class Desk:
 
     def _triage(self, reply: dict[str, Any]) -> None:
         lead = reply["lead_email"]
+        if not reply["auto_reply"] and self.store.cancel_followups(lead, "they replied", before_reply_id=reply["id"]):
+            self.stats["followups_cancelled"] += 1
         if not reply["body_complete"]:
             try:
                 full = reply_from_item(self.inbox.get_email(reply["provider_id"]))
@@ -248,8 +253,6 @@ class Desk:
                 verdict = self.drafter.classify(reply, verdict)
             self.store.update_reply(reply["id"], label=verdict.label, draft=verdict.draft,
                                     reason="%s (%s)" % (verdict.reason, verdict.source))
-            if self.store.cancel_followups(lead, "they replied"):
-                self.stats["followups_cancelled"] += 1
             reply = self.store.reply(reply["id"]) or reply
         if reply["label"] == "unsubscribe":
             self._unsubscribe(reply)
@@ -378,12 +381,14 @@ class Desk:
             return self._back_to_pending(card, "this draft has not been displayed in full; nothing was sent")
         if self.store.is_suppressed(reply["lead_email"]):
             return self._settle(card, "closed", "this address unsubscribed; nothing was sent")
-        if reply["page_url"] and reply["page_url"] in card["draft"]:
-            ok, why = pages.check_live(reply["page_url"], reply["page_marker"], self.fetch)
+        if self.store.has_newer_reply(reply["id"]):
+            return self._settle(card, "stale", "they wrote again, so this draft is out of date; nothing was sent")
+        for url in drafts.page_links(card["draft"], reply["page_url"] or "", self.cfg["business"]["booking_url"]):
+            ok, why = pages.check_live(url, reply["page_marker"], self.fetch)
             if not ok:
                 return self._back_to_pending(card, "the page is not live (%s); nothing was sent" % why)
         try:
-            thread = self.inbox.thread(reply["thread_id"], reply["lead_email"])
+            thread = self.inbox.thread("", reply["lead_email"])
             newer = newer_inbound(thread, reply)
         except Exception as e:
             raise_if_rate_limited(e)
@@ -505,6 +510,8 @@ class Desk:
         reply = self.store.reply(card["reply_id"])
         if not gaps or reply is None:
             return
+        if self.store.has_newer_reply(reply["id"]):
+            return
         now = (parse_ts(card["updated_at"]) or self.clock()).astimezone(self.tz)
         if card["kind"] == "reply":
             hint = self._hint(reply)
@@ -545,8 +552,12 @@ class Desk:
             if self.store.is_suppressed(reply["lead_email"]):
                 self.store.move_followup(f["id"], "cancelled", ("scheduled",), "unsubscribed")
                 continue
+            if self.store.has_newer_reply(reply["id"]):
+                self.store.move_followup(f["id"], "cancelled", ("scheduled",), "they replied")
+                self.stats["followups_cancelled"] += 1
+                continue
             try:
-                thread = self.inbox.thread(reply["thread_id"], reply["lead_email"])
+                thread = self.inbox.thread("", reply["lead_email"])
                 newer = newer_inbound(thread, reply)
             except Exception as e:
                 raise_if_rate_limited(e)

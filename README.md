@@ -35,7 +35,7 @@ The demo runs the real desk, ledger, classifier and page builder against a fake 
 `reply-desk run` is one tick. `reply-desk run --loop` keeps ticking and picks up taps within seconds. Each tick:
 
 1. **Recover.** Anything a stopped process left in flight is settled first, without sending (see below).
-2. **Poll.** New replies are read from Instantly and stored once each, keyed by Instantly's message ID. Each poll reads up to three pages and saves its continuation and original time window, so a backlog resumes across ticks and restarts. Auto-replies are recorded and get no card. Truncated or missing bodies wait for a complete read before drafting; retrieval is retried on later ticks.
+2. **Poll.** New replies are read from Instantly and stored once each, keyed by Instantly's message ID. Each poll reads up to three pages and saves its time window before the first request, then its continuation after processing each page, so an interrupted first poll or a backlog resumes across ticks and restarts. Auto-replies are recorded and get no card. Truncated or missing bodies wait for a complete read before drafting; retrieval is retried on later ticks.
 3. **Sort and draft.** Plain rules label each reply (or the optional model does, and its answer is checked). An interested reply gets its page built and published, and its card waits until the page is live. Unsubscribes are suppressed. Every other reply becomes a card with a draft.
 4. **Taps.** Send, Edit and Skip arrive by long polling, so there is no public webhook to expose. Edit asks you to reply to a message with the new text.
 5. **Follow-ups.** A follow-up that is due becomes a card, unless the person has written since.
@@ -46,7 +46,9 @@ Retry delays come from response bodies and `Retry-After` headers, including SDK 
 
 When you tap Send, the desk checks that the draft has nothing left to fill in, that the address hasn't unsubscribed, that a linked page still answers 200 with its marker, and that the person hasn't written again since the card was made (if they have, the card is closed as stale). In dry-run mode, the default, the checks run and nothing is sent.
 
-Thread checks read every page and block sending if any page or required message metadata cannot be read. Drafts are limited to 2,500 characters, the size shown on a card. Each Send button identifies that draft; edits require a successful card update and a new tap on the updated button. Telegram messages are checked for length after decoding their markup and are never sliced.
+Freshness checks read every page across all of the recipient's threads and also check stored replies. A newer reply in any thread makes an older card stale, even if the provider read has not caught up. Missing pages or required message metadata block sending. Drafts are limited to 2,500 characters, the size shown on a card. Each Send button identifies that draft; edits require a successful card update and a new tap on the updated button. Telegram messages are checked for length after decoding their markup and are never sliced.
+
+Page checks use the complete destinations written in the draft, including edited paths and queries. Links referencing the prepared page or its host must return 200 with that page's marker; the exact configured booking link is exempt from the page-marker check. Keep URLs separated from surrounding text by whitespace. Model page and booking tokens cannot have attached text, punctuation, paths, queries or fragments; invalid model drafts fall back to the rules. A rate-limited page check stops the tick and preserves the remaining page-check attempts.
 
 Card posts are claimed before contacting Telegram. If the post fails, returns no message ID or is interrupted, its outcome is locked and it is never posted again automatically. `reply-desk status` lists these cards; check Telegram and answer the lead by hand. Unposted cards whose delivery was never attempted can be posted during recovery. Before a deploy command, the page URL and marker are saved; recovery checks that URL without repeating the command. If the page never appears, check the deployment and answer by hand.
 
@@ -93,6 +95,8 @@ After a confirmed send, the next follow-up is planned from the person's own word
 When several phrases match, the latest wins. A date more than 90 days out is ignored as a misread. With no phrase, follow-ups use `gaps_days` (2, 4 and 7 days by default). Setting `gaps_days = []` also cancels existing scheduled follow-ups and closes their pending cards before taps are processed. A plain "no thanks" gets a polite close and no follow-ups. Each follow-up is a card like any other and is dropped if the person writes first. The time zone defaults to UTC; set an IANA name to preserve the chosen local hour across daylight-saving changes. Empty time zones are rejected. The parser is `src/reply_desk/timing.py`, tested against a fixed clock in `tests/test_timing.py`.
 
 Skipping a follow-up ends its sequence. Recovery completes interrupted transitions for skipped, stale, closed and dry-run cards without creating another follow-up or sending anything.
+
+New replies cancel older scheduled follow-ups and close pending follow-up cards across all threads before body retrieval or model work. An interrupted model call cannot leave an old sequence sendable. A delayed older reply does not cancel a newer sequence.
 
 ## Connectors
 

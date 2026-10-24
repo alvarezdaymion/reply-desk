@@ -130,17 +130,22 @@ def cmd_check(args: argparse.Namespace) -> int:
 def check_page(cfg: config_mod.Config, fetch: Any = None, sleep: Any = time.sleep) -> bool:
     """Publish a test page and run the same live check a real reply gets."""
     from . import pages
+    from .http import HttpError, retry_delay
 
     fetch = fetch or pages.urllib_fetch
     test = {"first_name": "Test", "company": "Reply Desk check", "lead_email": "check@example.com"}
     page, note = pages.build(cfg, test, pages.publisher_for(cfg))
     print("  test page %s (%s)" % (page.url, note))
-    ok, why = pages.check_live(page.url, page.marker, fetch)
-    for _ in range(4):  # a host can take a few seconds to serve a new deploy
-        if ok:
-            break
-        sleep(3)
+    try:
         ok, why = pages.check_live(page.url, page.marker, fetch)
+        for _ in range(4):  # a host can take a few seconds to serve a new deploy
+            if ok:
+                break
+            sleep(3)
+            ok, why = pages.check_live(page.url, page.marker, fetch)
+    except HttpError as e:
+        print("  live check: %s; wait at least %g seconds before checking again" % (e, retry_delay(e)))
+        return False
     print("  live check: %s" % why)
     return ok
 

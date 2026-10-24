@@ -18,7 +18,7 @@ Run `uv run reply-desk init` to create `reply-desk.toml`, then ask:
 2. **Booking link** (optional). Drafts and pages show it when it is set.
 3. **The page.** What an interested lead should see: a headline, one or two short paragraphs, a few bullet points. Placeholders `{first_name}`, `{company}` and `{business}` work in each.
 4. **Canned answers.** The questions leads ask most (price, process, location, timing) and the owner's answer to each, as `[[answers]]` with keywords and complete plain text, without placeholders. A question with no match gets a draft that must be edited before it can be sent.
-5. **Draft wording.** Show them `[drafts]`. Keep each placeholder on the line it belongs to: a line whose placeholder is empty is left out.
+5. **Draft wording.** Show them `[drafts]`. Keep each placeholder on the line it belongs to: a line whose placeholder is empty is left out. Separate link placeholders from other text with spaces or line breaks. The full rendered page destination is checked before sending, including any edited path or query.
 6. **Follow-ups.** Default gaps are 2, 4 and 7 days; `gaps_days = []` turns them off, cancels existing scheduled follow-ups and closes their pending approval cards. Set `send_hour` and `timezone` (UTC by default, or an IANA name such as `"America/Chicago"` to follow daylight-saving changes). An empty time zone is rejected.
 7. **Campaigns.** Watch all Instantly campaigns, or only the ones listed in `[inbox] campaign_ids`.
 
@@ -49,6 +49,8 @@ Each interested lead gets `site/<slug>/index.html`, and its URL is `<base_url>/<
 
 Done when `uv run reply-desk check --page` publishes a test page and prints "HTTP 200 and the page marker matched". It leaves one noindex test page on the host.
 
+If the host rate-limits a page check, the command stops without another GET and reports how long to wait. During normal operation, page rate limits enter the saved cooldown without consuming a page-failure attempt.
+
 The desk saves each lead page's URL and marker before running a deploy command, and never repeats an uncertain command automatically. If a deploy fails or is interrupted, later ticks only check the saved URL. Check the deployment by hand if it never becomes live.
 
 ## 6. Run in dry-run
@@ -62,6 +64,8 @@ Start `uv run reply-desk run --loop` in a terminal and have the owner reply to o
 Then install the service from `examples/scheduling/` (systemd on Linux, launchd on macOS, or cron for one tick a minute), replacing `/path/to/reply-desk` and `/path/to/uv` (`which uv`). Done when `uv run reply-desk status` shows the replies and cards you expect.
 
 Incomplete reply bodies wait for retrieval before any draft is made. A failed or interrupted Telegram card post is locked and never reposted automatically, since Telegram may have accepted it. `status` lists these cards; check Telegram and answer the lead by hand. API rate limits stop the tick immediately and save a cooldown across restarts; later ticks make no API calls until the delay expires. Other loop errors use exponential backoff.
+
+Freshness checks cover every thread for the same recipient, as well as stored replies. A new reply cancels older follow-up schedules and closes their pending cards before body retrieval or model work, even if it arrived in another thread. Poll windows are saved before the first request so an interruption cannot move the initial lookback past an unread reply.
 
 Cooldowns honor valid `Retry-After` response headers from both the HTTP connectors and the model SDK, in seconds or as an HTTP date. If the body and header specify different delays, the longer valid delay applies.
 

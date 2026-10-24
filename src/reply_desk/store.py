@@ -224,6 +224,12 @@ class Store:
     def has_reply(self, provider_id: str) -> bool:
         return self._one("SELECT 1 AS x FROM replies WHERE provider_id = ?", (provider_id,)) is not None
 
+    def has_newer_reply(self, reply_id: int) -> bool:
+        return self._one("SELECT 1 AS x FROM replies newer JOIN replies original"
+                         " ON newer.lead_email = original.lead_email WHERE original.id = ?"
+                         " AND newer.id != original.id AND newer.auto_reply = 0"
+                         " AND newer.received_at >= original.received_at LIMIT 1", (reply_id,)) is not None
+
     def replies(self, *statuses: str) -> list[dict[str, Any]]:
         marks = ", ".join("?" for _ in statuses)
         return self._all("SELECT * FROM replies WHERE status IN (%s) ORDER BY received_at, id" % marks, statuses)
@@ -388,12 +394,21 @@ class Store:
                 self.log("followup." + to, followup_id, note, c)
             return moved
 
-    def cancel_followups(self, lead_email: str, reason: str) -> int:
+    def cancel_followups(self, lead_email: str, reason: str, *, before_reply_id: int | None = None) -> int:
+        targets = "SELECT id FROM replies WHERE lead_email = ?"
+        args: tuple[Any, ...] = (lead_email.lower(),)
+        if before_reply_id is not None:
+            targets += " AND id != ? AND received_at <= (SELECT received_at FROM replies WHERE id = ?)"
+            args += (before_reply_id, before_reply_id)
         with self.tx() as c:
             cur = c.execute(
-                "UPDATE followups SET state = 'cancelled', note = ?, updated_at = ? WHERE state = 'scheduled'"
-                " AND reply_id IN (SELECT id FROM replies WHERE lead_email = ?)",
-                (reason, self.now(), lead_email.lower()))
+                "UPDATE followups SET state = 'cancelled', note = ?, updated_at = ?"
+                " WHERE state IN ('scheduled', 'carded') AND reply_id IN (%s)" % targets,
+                (reason, self.now(), *args))
+            c.execute("UPDATE cards SET state = 'stale', note = ?, updated_at = ?"
+                      " WHERE kind = 'followup' AND state = 'pending' AND followup_id IN"
+                      " (SELECT id FROM followups WHERE state = 'cancelled' AND reply_id IN (%s))" % targets,
+                      (reason, self.now(), *args))
             if cur.rowcount:
                 self.log("followup.cancelled", lead_email.lower(), "%d: %s" % (cur.rowcount, reason), c)
             return cur.rowcount

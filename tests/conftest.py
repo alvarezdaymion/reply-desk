@@ -39,7 +39,9 @@ class FakeInbox:
     def thread(self, thread_id, lead_email):
         if self.thread_error:
             raise self.thread_error
-        return [dict(e) for e in self.emails.values() if e["thread_id"] == thread_id and not e.get("hidden")]
+        return [dict(e) for e in self.emails.values() if (not thread_id or e["thread_id"] == thread_id)
+                and (e["from_address_email"] == lead_email or e.get("to_address_email_list") == lead_email)
+                and not e.get("hidden")]
 
     def get_email(self, email_id):
         self.reads.append(email_id)
