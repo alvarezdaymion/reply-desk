@@ -20,7 +20,7 @@ def status_lines(store: Store, tz: dt.tzinfo) -> list[str]:
         "Replies: %d (%s)" % (sum(c["replies"].values()), _counts(c["replies"], ["interested", "question", "not_now",
                                                                                    "unsubscribe", "ignored"])),
         "Cards: %d (%s)" % (sum(c["cards"].values()), _counts(c["cards"], ["pending", "sent", "locked", "skipped"])),
-        "Sends: %d (%s). Each is one call to the provider; none is ever sent twice."
+        "Sends: %d (%s). Each is at most one call to the provider; none is ever retried."
         % (sum(c["sends"].values()), _counts(c["sends"], ["confirmed", "locked"])),
     ]
     locked = store.sends("locked")

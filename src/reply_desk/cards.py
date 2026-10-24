@@ -37,7 +37,7 @@ def card_text(card: dict[str, Any], reply: dict[str, Any], followup: dict[str, A
         lines += ["<b>They wrote</b>", e(clip(authored_text(reply.get("body") or ""), 700)), ""]
     lines += ["<b>Draft</b>", e(clip(card["draft"], 2500))]
     if reply.get("page_url") and reply["page_url"] in card["draft"]:
-        lines += ["", "Page (checked live): %s" % e(reply["page_url"])]
+        lines += ["", "Page: %s" % e(reply["page_url"])]
     if status:
         lines += ["", "<b>%s</b>" % e(status)]
     return "\n".join(lines)

@@ -18,7 +18,7 @@ To use your own inboxes, run `uv run reply-desk init`, edit `reply-desk.toml`, p
 
 ## What the demo shows
 
-The demo runs the real desk, ledger, classifier and page builder against a fake inbox, a fake Telegram (cards print in the terminal) and a simulated clock, so the 3, 10 and 20 second waits take no time. State goes to `reply-desk-demo/state/reply-desk.db`.
+The demo runs the real desk, ledger, classifier and page builder against a fake inbox, a fake Telegram (cards print in the terminal), a page host that serves the local site folder, and a simulated clock, so the 3, 10 and 20 second waits take no time. State goes to `reply-desk-demo/state/reply-desk.db`.
 
 1. Six replies arrive across three sending inboxes: one interested, two questions, two "not now", one unsubscribe.
 2. The interested business gets a one-page site in `reply-desk-demo/site/`. Its card is posted only after a GET of the page returns 200 with that page's marker.
